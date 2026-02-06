@@ -1,0 +1,5 @@
+[submodule "rjsc-sys/WebKit"]
+	path = rjsc-sys/WebKit
+	url = https://github.com/WebKit/WebKit.git
+	shallow = true
+	branch = webkitgtk-2.50.4
