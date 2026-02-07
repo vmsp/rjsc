@@ -19,20 +19,63 @@ pub use promise::{
 };
 pub use value::JsValue;
 
+/// A JavaScript runtime (context group).
+///
+/// Contexts created from the same runtime share a VM and must remain on the
+/// same thread.
+pub struct JsRuntime {
+    inner: Rc<JsRuntimeInner>,
+}
+
+impl JsRuntime {
+    /// Creates a new JavaScript runtime (context group).
+    pub fn new() -> Self {
+        let raw = unsafe { JSContextGroupCreate() };
+        JsRuntime { inner: Rc::new(JsRuntimeInner { raw }) }
+    }
+
+    /// Creates a new context inside this runtime.
+    pub fn new_context(&self) -> JsContext {
+        JsContext::new_in(self)
+    }
+}
+
+impl Default for JsRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct JsRuntimeInner {
+    raw: JSContextGroupRef,
+}
+
+impl Drop for JsRuntimeInner {
+    fn drop(&mut self) {
+        unsafe { JSContextGroupRelease(self.raw) };
+    }
+}
+
 /// A JavaScript global execution context.
 ///
 /// This owns the underlying JSC global context and releases it on drop.
 pub struct JsContext {
     raw: JSGlobalContextRef,
     _not_send_sync: std::marker::PhantomData<Rc<()>>,
+    _runtime: Option<Rc<JsRuntimeInner>>,
 }
 
 impl JsContext {
-    /// Creates a new JavaScript execution context with the default global
-    /// object.
-    pub fn new() -> Self {
-        let raw = unsafe { JSGlobalContextCreate(ptr::null_mut()) };
-        Self { raw, _not_send_sync: std::marker::PhantomData }
+    /// Creates a new JavaScript execution context in the given runtime.
+    pub fn new_in(runtime: &JsRuntime) -> Self {
+        let raw = unsafe {
+            JSGlobalContextCreateInGroup(runtime.inner.raw, ptr::null_mut())
+        };
+        Self {
+            raw,
+            _not_send_sync: std::marker::PhantomData,
+            _runtime: Some(Rc::clone(&runtime.inner)),
+        }
     }
 
     /// Evaluates a string of JavaScript and returns the result.
@@ -166,12 +209,6 @@ impl JsContext {
     }
 }
 
-impl Default for JsContext {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Drop for JsContext {
     fn drop(&mut self) {
         unsafe { JSGlobalContextRelease(self.raw) };
@@ -235,6 +272,7 @@ unsafe extern "C" fn rust_callback_trampoline(
     let temp_ctx = ManuallyDrop::new(JsContext {
         raw: ctx as JSGlobalContextRef,
         _not_send_sync: std::marker::PhantomData,
+        _runtime: None,
     });
 
     // Wrap the arguments as JsValues. We protect them so they
@@ -326,32 +364,12 @@ unsafe fn js_string_to_rust(js_str: JSStringRef) -> String {
 mod tests {
     use super::*;
     use futures::task::noop_waker;
-    use std::ops::Deref;
     use std::pin::Pin;
-    use std::sync::{Mutex, MutexGuard};
     use std::task::{Context, Poll};
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    struct LockedContext {
-        _guard: MutexGuard<'static, ()>,
-        ctx: JsContext,
-    }
-
-    impl LockedContext {
-        fn new() -> Self {
-            let guard = TEST_LOCK.lock().unwrap();
-            let ctx = JsContext::new();
-            LockedContext { _guard: guard, ctx }
-        }
-    }
-
-    impl Deref for LockedContext {
-        type Target = JsContext;
-
-        fn deref(&self) -> &Self::Target {
-            &self.ctx
-        }
+    
+    fn test_ctx() -> JsContext {
+        let runtime = JsRuntime::new();
+        JsContext::new_in(&runtime)
     }
 
     fn poll_promise_future<'ctx>(
@@ -378,21 +396,21 @@ mod tests {
 
     #[test]
     fn eval_arithmetic() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx.eval("1 + 2").unwrap();
         assert_eq!(val.to_number(), 3.0);
     }
 
     #[test]
     fn eval_string() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx.eval("'hello' + ' world'").unwrap();
         assert_eq!(val.to_string_lossy(), "hello world");
     }
 
     #[test]
     fn eval_boolean() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx.eval("true").unwrap();
         assert!(val.to_boolean());
 
@@ -402,7 +420,7 @@ mod tests {
 
     #[test]
     fn eval_undefined_and_null() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
 
         let val = ctx.eval("undefined").unwrap();
         assert!(val.is_undefined());
@@ -413,7 +431,7 @@ mod tests {
 
     #[test]
     fn eval_syntax_error() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let err = ctx.eval("let x = ").unwrap_err();
         assert!(
             err.message().contains("SyntaxError"),
@@ -424,7 +442,7 @@ mod tests {
 
     #[test]
     fn eval_runtime_error() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let err = ctx.eval("nonexistent()").unwrap_err();
         assert!(
             err.message().contains("ReferenceError"),
@@ -435,14 +453,14 @@ mod tests {
 
     #[test]
     fn eval_async_resolved() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx.eval_async("Promise.resolve(42)").unwrap();
         assert_eq!(val.to_number(), 42.0);
     }
 
     #[test]
     fn eval_async_function() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx
             .eval_async("(async () => { return 'async works'; })()")
             .unwrap();
@@ -451,14 +469,14 @@ mod tests {
 
     #[test]
     fn eval_async_rejected() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let err = ctx.eval_async("Promise.reject('boom')").unwrap_err();
         assert_eq!(err.message(), "boom");
     }
 
     #[test]
     fn eval_async_chain() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx
             .eval_async("Promise.resolve(10).then(x => x * 2).then(x => x + 1)")
             .unwrap();
@@ -467,7 +485,7 @@ mod tests {
 
     #[test]
     fn eval_async_non_promise() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         // If the code doesn't return a promise, eval_async returns the value.
         let val = ctx.eval_async("42").unwrap();
         assert_eq!(val.to_number(), 42.0);
@@ -475,7 +493,7 @@ mod tests {
 
     #[test]
     fn eval_promise_returns_promise() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let promise = ctx.eval_promise("Promise.resolve(7)").unwrap();
         let val = promise.await_blocking(&ctx).unwrap();
         assert_eq!(val.to_number(), 7.0);
@@ -483,7 +501,7 @@ mod tests {
 
     #[test]
     fn value_to_promise() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx.eval("Promise.resolve(9)").unwrap();
         let promise = val.to_promise(&ctx).unwrap();
         let val = promise.await_blocking(&ctx).unwrap();
@@ -492,7 +510,7 @@ mod tests {
 
     #[test]
     fn promise_deferred_resolve() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let (promise, resolver) = JsPromise::deferred(&ctx).unwrap();
         let mut fut = Box::pin(promise.into_future(&ctx));
         let waker = noop_waker();
@@ -506,7 +524,7 @@ mod tests {
 
     #[test]
     fn promise_deferred_reject() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let (promise, resolver) = JsPromise::deferred(&ctx).unwrap();
         let mut fut = Box::pin(promise.into_future(&ctx));
         let waker = noop_waker();
@@ -519,7 +537,7 @@ mod tests {
 
     #[test]
     fn promise_into_future() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let promise = ctx.eval_promise("Promise.resolve(123)").unwrap();
         let mut fut = Box::pin(promise.into_future(&ctx));
         let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
@@ -528,7 +546,7 @@ mod tests {
 
     #[test]
     fn value_undefined() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = JsValue::undefined(&ctx);
         assert!(val.is_undefined());
         assert!(!val.is_null());
@@ -537,7 +555,7 @@ mod tests {
 
     #[test]
     fn value_null() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = JsValue::null(&ctx);
         assert!(val.is_null());
         assert!(!val.is_undefined());
@@ -546,7 +564,7 @@ mod tests {
 
     #[test]
     fn value_from_bool() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let t = JsValue::from_bool(&ctx, true);
         assert!(t.is_boolean());
         assert!(t.to_boolean());
@@ -558,7 +576,7 @@ mod tests {
 
     #[test]
     fn value_from_f64() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = JsValue::from_f64(&ctx, 3.14);
         assert!(val.is_number());
         assert!((val.to_number() - 3.14).abs() < f64::EPSILON);
@@ -566,7 +584,7 @@ mod tests {
 
     #[test]
     fn value_from_str() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = JsValue::from_str(&ctx, "hello from rust");
         assert!(val.is_string());
         assert_eq!(val.to_string_lossy(), "hello from rust");
@@ -574,7 +592,7 @@ mod tests {
 
     #[test]
     fn object_new_and_properties() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let obj = JsObject::new(&ctx);
 
         assert!(!obj.has("foo"));
@@ -592,7 +610,7 @@ mod tests {
 
     #[test]
     fn object_delete_property() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let obj = JsObject::new(&ctx);
         let val = JsValue::from_str(&ctx, "bar");
         obj.set("x", &val).unwrap();
@@ -605,7 +623,7 @@ mod tests {
 
     #[test]
     fn object_index_access() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let arr = ctx.eval("[10, 20, 30]").unwrap();
         let arr_obj = arr.to_object(&ctx).unwrap();
 
@@ -623,7 +641,7 @@ mod tests {
 
     #[test]
     fn object_from_eval() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx.eval("({a: 1, b: 'two'})").unwrap();
         let obj = val.to_object(&ctx).unwrap();
 
@@ -636,7 +654,7 @@ mod tests {
 
     #[test]
     fn object_call_function() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let func_val = ctx.eval("(function(x) { return x * 2; })").unwrap();
         let func = func_val.to_object(&ctx).unwrap();
 
@@ -649,7 +667,7 @@ mod tests {
 
     #[test]
     fn object_call_method() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         let val = ctx
             .eval("({value: 10, double() { return this.value * 2; }})")
             .unwrap();
@@ -661,7 +679,7 @@ mod tests {
 
     #[test]
     fn register_fn_basic() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         ctx.register_fn("add", |ctx, args| {
             let a = args[0].to_number();
             let b = args[1].to_number();
@@ -673,7 +691,7 @@ mod tests {
 
     #[test]
     fn register_fn_returns_string() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         ctx.register_fn("greet", |ctx, args| {
             let name = args[0].to_string_lossy();
             Ok(JsValue::from_str(ctx, &format!("hi, {name}")))
@@ -684,7 +702,7 @@ mod tests {
 
     #[test]
     fn register_fn_error() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         ctx.register_fn("fail", |_ctx, _args| {
             Err("something went wrong".into())
         });
@@ -698,7 +716,7 @@ mod tests {
 
     #[test]
     fn register_fn_no_args() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         ctx.register_fn("forty_two", |ctx, _args| {
             Ok(JsValue::from_f64(ctx, 42.0))
         });
@@ -708,7 +726,7 @@ mod tests {
 
     #[test]
     fn register_fn_called_from_js_function() {
-        let ctx = LockedContext::new();
+        let ctx = test_ctx();
         ctx.register_fn("double", |ctx, args| {
             let n = args[0].to_number();
             Ok(JsValue::from_f64(ctx, n * 2.0))
