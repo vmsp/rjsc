@@ -1,0 +1,5 @@
+edition = "2024"
+max_width = 80
+newline_style = "Unix"
+style_edition = "2021"
+use_small_heuristics = "Max"

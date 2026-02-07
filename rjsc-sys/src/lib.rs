@@ -44,8 +44,9 @@ mod tests {
         unsafe {
             let ctx = JSGlobalContextCreate(ptr::null_mut());
 
-            let script =
-                JSStringCreateWithUTF8CString(c"'hello' + ' ' + 'from' + ' ' + 'JSC'".as_ptr());
+            let script = JSStringCreateWithUTF8CString(
+                c"'hello' + ' ' + 'from' + ' ' + 'JSC'".as_ptr(),
+            );
             let mut exception: JSValueRef = ptr::null();
             let result = JSEvaluateScript(
                 ctx,
@@ -72,7 +73,9 @@ mod tests {
     fn js_string_to_string(js_str: JSStringRef) -> String {
         let max_len = unsafe { JSStringGetMaximumUTF8CStringSize(js_str) };
         let mut buf = vec![0u8; max_len];
-        unsafe { JSStringGetUTF8CString(js_str, buf.as_mut_ptr() as *mut _, max_len) };
+        unsafe {
+            JSStringGetUTF8CString(js_str, buf.as_mut_ptr() as *mut _, max_len)
+        };
         let c_str = CStr::from_bytes_until_nul(&buf).unwrap();
         c_str.to_string_lossy().into_owned()
     }

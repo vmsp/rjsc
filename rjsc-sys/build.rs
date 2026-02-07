@@ -2,8 +2,11 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+use bindgen::Builder;
+use cmake::Config;
+
 fn main() {
-    let dst = cmake::Config::new("WebKit")
+    let dst = Config::new("WebKit")
         .generator("Ninja")
         .define("PORT", "JSCOnly")
         .define("ENABLE_STATIC_JSC", "ON")
@@ -45,12 +48,9 @@ fn main() {
     let jsc_headers = dst.join("build/JavaScriptCore/Headers");
     println!("cargo:include={}", jsc_headers.display());
 
-    let mut builder = bindgen::Builder::default()
+    let mut builder = Builder::default()
         .header(
-            jsc_headers
-                .join("JavaScriptCore/JavaScript.h")
-                .to_str()
-                .unwrap(),
+            jsc_headers.join("JavaScriptCore/JavaScript.h").to_str().unwrap(),
         )
         .clang_arg(format!("-I{}", jsc_headers.display()))
         // We're building from source, not as an Apple framework.
@@ -62,8 +62,11 @@ fn main() {
     // On macOS, WebKitAvailability.h includes CoreFoundation headers.
     // Point clang at the SDK so it can find them.
     if target_os == "macos" {
-        if let Ok(output) = Command::new("xcrun").args(["--show-sdk-path"]).output() {
-            let sdk_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if let Ok(output) =
+            Command::new("xcrun").args(["--show-sdk-path"]).output()
+        {
+            let sdk_path =
+                String::from_utf8_lossy(&output.stdout).trim().to_string();
             builder = builder.clang_arg(format!("-isysroot{sdk_path}"));
         }
     }
