@@ -212,11 +212,14 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
 name = "rjsc"
-version = "0.1.0"
+version = "2.50.4"
+dependencies = [
+ "rjsc-sys",
+]
 
 [[package]]
 name = "rjsc-sys"
-version = "0.1.0"
+version = "2.50.4"
 dependencies = [
  "bindgen",
  "cmake",

@@ -1,3 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["rjsc", "rjsc-sys"]
+
+[workspace.package]
+version = "2.50.4"
+edition = "2024"
