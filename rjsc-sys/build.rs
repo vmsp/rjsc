@@ -59,7 +59,6 @@ fn main() {
         .allowlist_type("JS.*")
         .allowlist_type("OpaqueJS.*")
         .allowlist_var("kJS.*");
-
     // On macOS, WebKitAvailability.h includes CoreFoundation headers.
     // Point clang at the SDK so it can find them.
     if target_os == "macos" {
@@ -68,7 +67,6 @@ fn main() {
             builder = builder.clang_arg(format!("-isysroot{sdk_path}"));
         }
     }
-
     let bindings = builder.generate().expect("Failed to generate bindings");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
