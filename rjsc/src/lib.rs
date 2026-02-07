@@ -1,15 +1,22 @@
 mod object;
+mod promise;
 mod value;
 
-use std::cell::Cell;
 use std::ffi::CStr;
+use std::ffi::CString;
 use std::fmt;
+use std::mem;
+use std::mem::ManuallyDrop;
 use std::ptr;
 use std::rc::Rc;
 
 use rjsc_sys::*;
 
 pub use object::JsObject;
+pub use promise::{
+    JsJobDriver, JsMicrotaskDrain, JsPromise, JsPromiseFuture,
+    JsPromiseResolver,
+};
 pub use value::JsValue;
 
 /// A JavaScript global execution context.
@@ -17,6 +24,7 @@ pub use value::JsValue;
 /// This owns the underlying JSC global context and releases it on drop.
 pub struct JsContext {
     raw: JSGlobalContextRef,
+    _not_send_sync: std::marker::PhantomData<Rc<()>>,
 }
 
 impl JsContext {
@@ -24,7 +32,7 @@ impl JsContext {
     /// object.
     pub fn new() -> Self {
         let raw = unsafe { JSGlobalContextCreate(ptr::null_mut()) };
-        JsContext { raw }
+        Self { raw, _not_send_sync: std::marker::PhantomData }
     }
 
     /// Evaluates a string of JavaScript and returns the result.
@@ -51,133 +59,30 @@ impl JsContext {
         Ok(unsafe { JsValue::from_raw(self, result) })
     }
 
-    /// Evaluates JavaScript code that returns a promise and resolves it.
+    /// Evaluates JavaScript code and, if it returns a promise, resolves it.
     ///
-    /// The code is expected to produce a promise (e.g. an async function call).
-    /// The promise is resolved (or rejected) via `.then()` / `.catch()`, and
-    /// JSC's automatic microtask draining handles the resolution before control
-    /// returns to Rust.
-    ///
-    /// Returns the resolved value on success, or the rejection reason as an
-    /// error.
+    /// This is a blocking helper that uses the default microtask drain driver.
+    /// Use [`JsPromise::into_future`] for non-blocking integration.
     pub fn eval_async(&self, code: &str) -> Result<JsValue<'_>, JsException> {
-        let promise = self.eval(code)?;
-
-        if !promise.is_object() {
-            return Ok(promise);
+        let value = self.eval(code)?;
+        if !value.is_object() {
+            return Ok(value);
         }
 
-        struct AsyncState {
-            settled: Cell<bool>,
-            resolved: Cell<JSValueRef>,
-            rejected: Cell<JSValueRef>,
+        let raw = value.raw;
+        match JsPromise::from_value(self, value) {
+            Ok(promise) => promise.await_blocking(self),
+            Err(_) => Ok(unsafe { JsValue::from_raw(self, raw) }),
         }
+    }
 
-        let state = Rc::new(AsyncState {
-            settled: Cell::new(false),
-            resolved: Cell::new(ptr::null()),
-            rejected: Cell::new(ptr::null()),
-        });
-
-        // Build on_resolve callback.
-        let s = Rc::clone(&state);
-        let on_resolve = self.make_callback(move |ctx, args| {
-            let val = if args.is_null() {
-                unsafe { JSValueMakeUndefined(ctx) }
-            } else {
-                unsafe { *args }
-            };
-            unsafe { JSValueProtect(ctx, val) };
-            s.resolved.set(val);
-            s.settled.set(true);
-            unsafe { JSValueMakeUndefined(ctx) }
-        });
-
-        let s = Rc::clone(&state);
-        let on_reject = self.make_callback(move |ctx, args| {
-            let val = if args.is_null() {
-                unsafe { JSValueMakeUndefined(ctx) }
-            } else {
-                unsafe { *args }
-            };
-            unsafe { JSValueProtect(ctx, val) };
-            s.rejected.set(val);
-            s.settled.set(true);
-            unsafe { JSValueMakeUndefined(ctx) }
-        });
-
-        // Get the `then` method from the promise object.
-        let promise_obj =
-            unsafe { JSValueToObject(self.raw, promise.raw, ptr::null_mut()) };
-        let then_key = unsafe { js_string_from_rust("then") };
-        let then_fn = unsafe {
-            let val = JSObjectGetProperty(
-                self.raw,
-                promise_obj,
-                then_key,
-                ptr::null_mut(),
-            );
-            JSStringRelease(then_key);
-            JSValueToObject(self.raw, val, ptr::null_mut())
-        };
-
-        // Call promise.then(onResolve, onReject). This enqueues
-        // microtasks; JSC drains them when the C API call returns.
-        let args = [on_resolve as JSValueRef, on_reject as JSValueRef];
-        unsafe {
-            JSObjectCallAsFunction(
-                self.raw,
-                then_fn,
-                promise_obj,
-                2,
-                args.as_ptr(),
-                ptr::null_mut(),
-            );
-        }
-
-        // Trigger microtask draining. JSC drains the microtask
-        // queue when JSEvaluateScript returns. Chained promises
-        // may need multiple drain rounds, so we loop.
-        let noop = unsafe { js_string_from_rust("0") };
-        for _ in 0..64 {
-            if state.settled.get() {
-                break;
-            }
-            unsafe {
-                JSEvaluateScript(
-                    self.raw,
-                    noop,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                    ptr::null_mut(),
-                );
-            }
-        }
-        unsafe { JSStringRelease(noop) };
-
-        if !state.settled.get() {
-            return Err(JsException {
-                message: "Promise did not settle synchronously. \
-                    eval_async only supports promises that resolve \
-                    via microtasks (no pending I/O or timers)."
-                    .to_string(),
-            });
-        }
-
-        let rejected_raw = state.rejected.get();
-        if !rejected_raw.is_null() {
-            let err = JsException::from_jsvalue(self.raw, rejected_raw);
-            unsafe { JSValueUnprotect(self.raw, rejected_raw) };
-            return Err(err);
-        }
-
-        let resolved_raw = state.resolved.get();
-        // Wrap into JsValue (which will protect it again), then
-        // release our extra protect.
-        let result = unsafe { JsValue::from_raw(self, resolved_raw) };
-        unsafe { JSValueUnprotect(self.raw, resolved_raw) };
-        Ok(result)
+    /// Evaluates JavaScript code expected to return a promise.
+    pub fn eval_promise(
+        &self,
+        code: &str,
+    ) -> Result<JsPromise<'_>, JsException> {
+        let value = self.eval(code)?;
+        JsPromise::from_value(self, value)
     }
 
     /// Registers a Rust function as a global JavaScript function.
@@ -194,16 +99,13 @@ impl JsContext {
             ) -> Result<JsValue<'a>, String>
             + 'static,
     {
-        // Double-box: the inner Box<dyn Fn> is a fat pointer,
-        // so we wrap it in another Box to get a thin pointer
-        // that can round-trip through *mut c_void.
-        let inner: Box<RustCallback> = Box::new(f);
-        let outer: Box<Box<RustCallback>> = Box::new(inner);
-        let private = Box::into_raw(outer) as *mut std::ffi::c_void;
+        let cb: Box<RustCallback> = Box::new(f);
+        let holder = Box::new(CallbackHolder { cb });
+        let private = Box::into_raw(holder) as *mut std::ffi::c_void;
 
         // Create a JSClass with callAsFunction + finalize.
         let mut def = unsafe { kJSClassDefinitionEmpty };
-        let class_name = std::ffi::CString::new("RustFunction").unwrap();
+        let class_name = CString::new("RustFunction").unwrap();
         def.className = class_name.as_ptr();
         def.callAsFunction = Some(rust_callback_trampoline);
         def.finalize = Some(rust_callback_finalize);
@@ -232,21 +134,18 @@ impl JsContext {
     /// Creates a raw JS function object from a Rust closure.
     ///
     /// The closure receives the raw context and a pointer to the first argument
-    /// (may be null if argc == 0). This is an internal helper for `eval_async`
-    /// and similar low-level uses.
-    fn make_callback<F>(&self, f: F) -> JSObjectRef
+    /// (may be null if argc == 0). This is an internal helper for async
+    /// bridging and similar low-level uses.
+    pub(crate) fn make_callback<F>(&self, f: F) -> JSObjectRef
     where
         F: Fn(JSContextRef, *const JSValueRef) -> JSValueRef + 'static,
     {
-        type RawCb =
-            dyn Fn(JSContextRef, *const JSValueRef) -> JSValueRef + 'static;
-
-        let inner: Box<RawCb> = Box::new(f);
-        let outer: Box<Box<RawCb>> = Box::new(inner);
-        let private = Box::into_raw(outer) as *mut std::ffi::c_void;
+        let cb: Box<RawCb> = Box::new(f);
+        let holder = Box::new(CallbackHolder { cb });
+        let private = Box::into_raw(holder) as *mut std::ffi::c_void;
 
         let mut def = unsafe { kJSClassDefinitionEmpty };
-        let name = std::ffi::CString::new("RjscRawCb").unwrap();
+        let name = CString::new("RjscRawCb").unwrap();
         def.className = name.as_ptr();
         def.callAsFunction = Some(raw_callback_trampoline);
         def.finalize = Some(raw_callback_finalize);
@@ -309,10 +208,12 @@ impl fmt::Display for JsException {
 
 impl std::error::Error for JsException {}
 
-// -- Callback bridging --
-
 type RustCallback = dyn for<'a> Fn(&'a JsContext, &[JsValue<'a>]) -> Result<JsValue<'a>, String>
     + 'static;
+
+struct CallbackHolder<T: ?Sized> {
+    cb: Box<T>,
+}
 
 unsafe extern "C" fn rust_callback_trampoline(
     ctx: JSContextRef,
@@ -326,12 +227,14 @@ unsafe extern "C" fn rust_callback_trampoline(
     if private.is_null() {
         return unsafe { JSValueMakeUndefined(ctx) };
     }
-    let cb = unsafe { &**(private as *const Box<RustCallback>) };
+    let holder = unsafe { &*(private as *const CallbackHolder<RustCallback>) };
+    let cb = &*holder.cb;
 
     // Build a temporary JsContext wrapper. We must NOT drop this
     // (it doesn't own the context), so use ManuallyDrop.
-    let temp_ctx = std::mem::ManuallyDrop::new(JsContext {
+    let temp_ctx = ManuallyDrop::new(JsContext {
         raw: ctx as JSGlobalContextRef,
+        _not_send_sync: std::marker::PhantomData,
     });
 
     // Wrap the arguments as JsValues. We protect them so they
@@ -348,7 +251,7 @@ unsafe extern "C" fn rust_callback_trampoline(
             let raw = val.raw;
             // Prevent the JsValue from unprotecting on drop —
             // the caller (JSC) manages the return value.
-            std::mem::forget(val);
+            mem::forget(val);
             raw
         }
         Err(msg) => {
@@ -371,11 +274,11 @@ unsafe extern "C" fn rust_callback_finalize(obj: JSObjectRef) {
     let private = unsafe { JSObjectGetPrivate(obj) };
     if !private.is_null() {
         // Drop the boxed closure.
-        let _ = unsafe { Box::from_raw(private as *mut Box<RustCallback>) };
+        let _ = unsafe {
+            Box::from_raw(private as *mut CallbackHolder<RustCallback>)
+        };
     }
 }
-
-// -- Raw callback bridging (for make_callback) --
 
 type RawCb = dyn Fn(JSContextRef, *const JSValueRef) -> JSValueRef + 'static;
 
@@ -391,7 +294,8 @@ unsafe extern "C" fn raw_callback_trampoline(
     if private.is_null() {
         return unsafe { JSValueMakeUndefined(ctx) };
     }
-    let cb = unsafe { &**(private as *const Box<RawCb>) };
+    let holder = unsafe { &*(private as *const CallbackHolder<RawCb>) };
+    let cb = &*holder.cb;
     let args = if argc == 0 { ptr::null() } else { argv };
     cb(ctx, args)
 }
@@ -399,16 +303,12 @@ unsafe extern "C" fn raw_callback_trampoline(
 unsafe extern "C" fn raw_callback_finalize(obj: JSObjectRef) {
     let private = unsafe { JSObjectGetPrivate(obj) };
     if !private.is_null() {
-        let _ = unsafe { Box::from_raw(private as *mut Box<RawCb>) };
+        let _ = unsafe { Box::from_raw(private as *mut CallbackHolder<RawCb>) };
     }
 }
 
-// -- Internal helpers --
-
 unsafe fn js_string_from_rust(s: &str) -> JSStringRef {
-    // We need a null-terminated string. Use a small stack buffer when possible.
-    let c_string =
-        std::ffi::CString::new(s).expect("JS string contained interior NUL");
+    let c_string = CString::new(s).expect("JS string contained interior NUL");
     unsafe { JSStringCreateWithUTF8CString(c_string.as_ptr()) }
 }
 
@@ -425,25 +325,74 @@ unsafe fn js_string_to_rust(js_str: JSStringRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use futures::task::noop_waker;
+    use std::ops::Deref;
+    use std::pin::Pin;
+    use std::sync::{Mutex, MutexGuard};
+    use std::task::{Context, Poll};
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct LockedContext {
+        _guard: MutexGuard<'static, ()>,
+        ctx: JsContext,
+    }
+
+    impl LockedContext {
+        fn new() -> Self {
+            let guard = TEST_LOCK.lock().unwrap();
+            let ctx = JsContext::new();
+            LockedContext { _guard: guard, ctx }
+        }
+    }
+
+    impl Deref for LockedContext {
+        type Target = JsContext;
+
+        fn deref(&self) -> &Self::Target {
+            &self.ctx
+        }
+    }
+
+    fn poll_promise_future<'ctx>(
+        mut fut: Pin<&mut JsPromiseFuture<'ctx>>,
+        ctx: &'ctx JsContext,
+    ) -> Result<JsValue<'ctx>, JsException> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let driver = JsMicrotaskDrain::default();
+
+        for _ in 0..driver.max_rounds() {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => return result,
+                Poll::Pending => {
+                    driver.drain_jobs(ctx)?;
+                }
+            }
+        }
+
+        Err(JsException {
+            message: "Future did not resolve within drain budget.".to_string(),
+        })
+    }
 
     #[test]
     fn eval_arithmetic() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx.eval("1 + 2").unwrap();
         assert_eq!(val.to_number(), 3.0);
     }
 
     #[test]
     fn eval_string() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx.eval("'hello' + ' world'").unwrap();
         assert_eq!(val.to_string_lossy(), "hello world");
     }
 
     #[test]
     fn eval_boolean() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx.eval("true").unwrap();
         assert!(val.to_boolean());
 
@@ -453,7 +402,7 @@ mod tests {
 
     #[test]
     fn eval_undefined_and_null() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
 
         let val = ctx.eval("undefined").unwrap();
         assert!(val.is_undefined());
@@ -464,7 +413,7 @@ mod tests {
 
     #[test]
     fn eval_syntax_error() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let err = ctx.eval("let x = ").unwrap_err();
         assert!(
             err.message().contains("SyntaxError"),
@@ -475,7 +424,7 @@ mod tests {
 
     #[test]
     fn eval_runtime_error() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let err = ctx.eval("nonexistent()").unwrap_err();
         assert!(
             err.message().contains("ReferenceError"),
@@ -486,14 +435,14 @@ mod tests {
 
     #[test]
     fn eval_async_resolved() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx.eval_async("Promise.resolve(42)").unwrap();
         assert_eq!(val.to_number(), 42.0);
     }
 
     #[test]
     fn eval_async_function() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx
             .eval_async("(async () => { return 'async works'; })()")
             .unwrap();
@@ -502,14 +451,14 @@ mod tests {
 
     #[test]
     fn eval_async_rejected() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let err = ctx.eval_async("Promise.reject('boom')").unwrap_err();
         assert_eq!(err.message(), "boom");
     }
 
     #[test]
     fn eval_async_chain() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx
             .eval_async("Promise.resolve(10).then(x => x * 2).then(x => x + 1)")
             .unwrap();
@@ -518,15 +467,68 @@ mod tests {
 
     #[test]
     fn eval_async_non_promise() {
-        let ctx = JsContext::new();
-        // If the code doesn't return a promise, eval_async just returns the value.
+        let ctx = LockedContext::new();
+        // If the code doesn't return a promise, eval_async returns the value.
         let val = ctx.eval_async("42").unwrap();
         assert_eq!(val.to_number(), 42.0);
     }
 
     #[test]
+    fn eval_promise_returns_promise() {
+        let ctx = LockedContext::new();
+        let promise = ctx.eval_promise("Promise.resolve(7)").unwrap();
+        let val = promise.await_blocking(&ctx).unwrap();
+        assert_eq!(val.to_number(), 7.0);
+    }
+
+    #[test]
+    fn value_to_promise() {
+        let ctx = LockedContext::new();
+        let val = ctx.eval("Promise.resolve(9)").unwrap();
+        let promise = val.to_promise(&ctx).unwrap();
+        let val = promise.await_blocking(&ctx).unwrap();
+        assert_eq!(val.to_number(), 9.0);
+    }
+
+    #[test]
+    fn promise_deferred_resolve() {
+        let ctx = LockedContext::new();
+        let (promise, resolver) = JsPromise::deferred(&ctx).unwrap();
+        let mut fut = Box::pin(promise.into_future(&ctx));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+        let value = JsValue::from_str(&ctx, "done");
+        resolver.resolve(&ctx, &value).unwrap();
+        let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+        assert_eq!(val.to_string_lossy(), "done");
+    }
+
+    #[test]
+    fn promise_deferred_reject() {
+        let ctx = LockedContext::new();
+        let (promise, resolver) = JsPromise::deferred(&ctx).unwrap();
+        let mut fut = Box::pin(promise.into_future(&ctx));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+        resolver.reject_str(&ctx, "nope").unwrap();
+        let err = poll_promise_future(fut.as_mut(), &ctx).unwrap_err();
+        assert_eq!(err.message(), "nope");
+    }
+
+    #[test]
+    fn promise_into_future() {
+        let ctx = LockedContext::new();
+        let promise = ctx.eval_promise("Promise.resolve(123)").unwrap();
+        let mut fut = Box::pin(promise.into_future(&ctx));
+        let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+        assert_eq!(val.to_number(), 123.0);
+    }
+
+    #[test]
     fn value_undefined() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = JsValue::undefined(&ctx);
         assert!(val.is_undefined());
         assert!(!val.is_null());
@@ -535,7 +537,7 @@ mod tests {
 
     #[test]
     fn value_null() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = JsValue::null(&ctx);
         assert!(val.is_null());
         assert!(!val.is_undefined());
@@ -544,7 +546,7 @@ mod tests {
 
     #[test]
     fn value_from_bool() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let t = JsValue::from_bool(&ctx, true);
         assert!(t.is_boolean());
         assert!(t.to_boolean());
@@ -556,7 +558,7 @@ mod tests {
 
     #[test]
     fn value_from_f64() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = JsValue::from_f64(&ctx, 3.14);
         assert!(val.is_number());
         assert!((val.to_number() - 3.14).abs() < f64::EPSILON);
@@ -564,7 +566,7 @@ mod tests {
 
     #[test]
     fn value_from_str() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = JsValue::from_str(&ctx, "hello from rust");
         assert!(val.is_string());
         assert_eq!(val.to_string_lossy(), "hello from rust");
@@ -572,7 +574,7 @@ mod tests {
 
     #[test]
     fn object_new_and_properties() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let obj = JsObject::new(&ctx);
 
         assert!(!obj.has("foo"));
@@ -590,7 +592,7 @@ mod tests {
 
     #[test]
     fn object_delete_property() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let obj = JsObject::new(&ctx);
         let val = JsValue::from_str(&ctx, "bar");
         obj.set("x", &val).unwrap();
@@ -603,7 +605,7 @@ mod tests {
 
     #[test]
     fn object_index_access() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let arr = ctx.eval("[10, 20, 30]").unwrap();
         let arr_obj = arr.to_object(&ctx).unwrap();
 
@@ -621,7 +623,7 @@ mod tests {
 
     #[test]
     fn object_from_eval() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx.eval("({a: 1, b: 'two'})").unwrap();
         let obj = val.to_object(&ctx).unwrap();
 
@@ -634,7 +636,7 @@ mod tests {
 
     #[test]
     fn object_call_function() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let func_val = ctx.eval("(function(x) { return x * 2; })").unwrap();
         let func = func_val.to_object(&ctx).unwrap();
 
@@ -647,7 +649,7 @@ mod tests {
 
     #[test]
     fn object_call_method() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         let val = ctx
             .eval("({value: 10, double() { return this.value * 2; }})")
             .unwrap();
@@ -659,7 +661,7 @@ mod tests {
 
     #[test]
     fn register_fn_basic() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         ctx.register_fn("add", |ctx, args| {
             let a = args[0].to_number();
             let b = args[1].to_number();
@@ -671,7 +673,7 @@ mod tests {
 
     #[test]
     fn register_fn_returns_string() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         ctx.register_fn("greet", |ctx, args| {
             let name = args[0].to_string_lossy();
             Ok(JsValue::from_str(ctx, &format!("hi, {name}")))
@@ -682,7 +684,7 @@ mod tests {
 
     #[test]
     fn register_fn_error() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         ctx.register_fn("fail", |_ctx, _args| {
             Err("something went wrong".into())
         });
@@ -696,7 +698,7 @@ mod tests {
 
     #[test]
     fn register_fn_no_args() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         ctx.register_fn("forty_two", |ctx, _args| {
             Ok(JsValue::from_f64(ctx, 42.0))
         });
@@ -706,7 +708,7 @@ mod tests {
 
     #[test]
     fn register_fn_called_from_js_function() {
-        let ctx = JsContext::new();
+        let ctx = LockedContext::new();
         ctx.register_fn("double", |ctx, args| {
             let n = args[0].to_number();
             Ok(JsValue::from_f64(ctx, n * 2.0))

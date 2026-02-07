@@ -3,7 +3,7 @@ use std::ptr;
 
 use rjsc_sys::*;
 
-use crate::{js_string_to_rust, JsContext, JsException, JsObject};
+use crate::{js_string_to_rust, JsContext, JsException, JsObject, JsPromise};
 
 /// A JavaScript value, tied to the lifetime of its [`JsContext`].
 ///
@@ -121,6 +121,14 @@ impl<'ctx> JsValue<'ctx> {
             return Err(JsException::from_jsvalue(self.ctx, exception));
         }
         Ok(unsafe { JsObject::from_raw(ctx, obj) })
+    }
+
+    /// Converts the value to a [`JsPromise`].
+    pub fn to_promise(
+        self,
+        ctx: &'ctx JsContext,
+    ) -> Result<JsPromise<'ctx>, JsException> {
+        JsPromise::from_value(ctx, self)
     }
 
     /// Converts the value to a Rust `String` using JavaScript's `String()`
