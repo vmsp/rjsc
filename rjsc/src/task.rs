@@ -1,0 +1,86 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+use crate::promise::JsPromiseResolverOwned;
+use crate::{JsContext, JsValue, JsValueOwned};
+
+#[doc(hidden)]
+pub struct Task {
+    future: Pin<Box<dyn Future<Output = TaskResult> + 'static>>,
+    resolver: JsPromiseResolverOwned,
+}
+
+#[doc(hidden)]
+pub enum TaskResult {
+    Ok(TaskValue),
+    Value(JsValueOwned),
+    Err(String),
+}
+
+#[doc(hidden)]
+pub enum TaskValue {
+    Undefined,
+    Bool(bool),
+    F64(f64),
+    String(String),
+}
+
+impl Task {
+    pub fn new(
+        future: Pin<Box<dyn Future<Output = TaskResult> + 'static>>,
+        resolver: JsPromiseResolverOwned,
+    ) -> Self {
+        Task { future, resolver }
+    }
+
+    pub(crate) fn poll(&mut self, ctx: &JsContext) -> Poll<()> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match self.future.as_mut().poll(&mut cx) {
+            Poll::Ready(TaskResult::Ok(val)) => {
+                let value = match val {
+                    TaskValue::Undefined => JsValue::undefined(ctx),
+                    TaskValue::Bool(v) => JsValue::from_bool(ctx, v),
+                    TaskValue::F64(v) => JsValue::from_f64(ctx, v),
+                    TaskValue::String(v) => JsValue::from_str(ctx, &v),
+                };
+                if let Err(err) = self.resolver.resolve(ctx, &value) {
+                    self.resolver
+                        .reject_str(ctx, &err.message().to_string())
+                        .ok();
+                }
+                Poll::Ready(())
+            }
+            Poll::Ready(TaskResult::Value(val)) => {
+                let value = val.into_value();
+                if let Err(err) = self.resolver.resolve(ctx, &value) {
+                    self.resolver
+                        .reject_str(ctx, &err.message().to_string())
+                        .ok();
+                }
+                Poll::Ready(())
+            }
+            Poll::Ready(TaskResult::Err(err)) => {
+                self.resolver.reject_str(ctx, &err).ok();
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn noop_waker() -> Waker {
+    unsafe fn clone(_: *const ()) -> RawWaker {
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+    unsafe fn wake(_: *const ()) {}
+    unsafe fn wake_by_ref(_: *const ()) {}
+    unsafe fn drop(_: *const ()) {}
+
+    static VTABLE: RawWakerVTable =
+        RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+
+    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+}

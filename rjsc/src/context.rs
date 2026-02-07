@@ -4,18 +4,13 @@ use std::rc::Rc;
 
 use rjsc_sys::*;
 
-use crate::callbacks::CallbackHolder;
-use crate::callbacks::RawCb;
-use crate::callbacks::rust_callback_finalize;
-use crate::callbacks::rust_callback_trampoline;
-use crate::callbacks::raw_callback_finalize;
-use crate::callbacks::raw_callback_trampoline;
-use crate::callbacks::RustCallback;
+use crate::callbacks::{
+    raw_callback_finalize, raw_callback_trampoline, rust_callback_finalize,
+    rust_callback_trampoline, CallbackHolder, RawCb, RustCallback,
+};
 use crate::js_string_from_rust;
-use crate::JsException;
-use crate::JsPromise;
-use crate::JsRuntime;
-use crate::JsValue;
+use crate::task::Task;
+use crate::{JsException, JsPromise, JsRuntime, JsValue};
 
 /// A JavaScript global execution context.
 ///
@@ -89,6 +84,13 @@ impl JsContext {
         JsPromise::from_value(self, value)
     }
 
+    pub fn poll_async(&self) -> usize {
+        match &self._runtime {
+            Some(runtime) => runtime.poll_async(self),
+            None => 0,
+        }
+    }
+
     /// Registers a Rust function as a global JavaScript function.
     ///
     /// The callback receives a slice of [`JsValue`] arguments and returns
@@ -104,7 +106,8 @@ impl JsContext {
             + 'static,
     {
         let cb: Box<RustCallback> = Box::new(f);
-        let holder = Box::new(CallbackHolder { cb });
+        let holder =
+            Box::new(CallbackHolder { cb, runtime: self._runtime.clone() });
         let private = Box::into_raw(holder) as *mut std::ffi::c_void;
 
         let mut def = unsafe { kJSClassDefinitionEmpty };
@@ -142,7 +145,8 @@ impl JsContext {
         F: Fn(JSContextRef, *const JSValueRef) -> JSValueRef + 'static,
     {
         let cb: Box<RawCb> = Box::new(f);
-        let holder = Box::new(CallbackHolder { cb });
+        let holder =
+            Box::new(CallbackHolder { cb, runtime: self._runtime.clone() });
         let private = Box::into_raw(holder) as *mut std::ffi::c_void;
 
         let mut def = unsafe { kJSClassDefinitionEmpty };
@@ -154,6 +158,13 @@ impl JsContext {
         let obj = unsafe { JSObjectMake(self.raw, class, private) };
         unsafe { JSClassRelease(class) };
         obj
+    }
+
+    #[doc(hidden)]
+    pub fn __rjsc_enqueue_task(&self, task: Task) {
+        if let Some(runtime) = &self._runtime {
+            runtime.push_task(task);
+        }
     }
 
     /// Returns the raw `JSGlobalContextRef`.

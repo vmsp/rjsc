@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rjsc-sys = { path = "../rjsc-sys" }
+rjsc-macros = { path = "../rjsc-macros" }
 
 [dev-dependencies]
 futures = "0.3"

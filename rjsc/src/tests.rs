@@ -25,9 +25,7 @@ fn poll_promise_future<'ctx>(
         }
     }
 
-    Err(JsException::new(
-        "Future did not resolve within drain budget.",
-    ))
+    Err(JsException::new("Future did not resolve within drain budget."))
 }
 
 #[test]
@@ -69,22 +67,14 @@ fn eval_undefined_and_null() {
 fn eval_syntax_error() {
     let ctx = test_ctx();
     let err = ctx.eval("let x = ").unwrap_err();
-    assert!(
-        err.message().contains("SyntaxError"),
-        "got: {}",
-        err.message()
-    );
+    assert!(err.message().contains("SyntaxError"), "got: {}", err.message());
 }
 
 #[test]
 fn eval_runtime_error() {
     let ctx = test_ctx();
     let err = ctx.eval("nonexistent()").unwrap_err();
-    assert!(
-        err.message().contains("ReferenceError"),
-        "got: {}",
-        err.message()
-    );
+    assert!(err.message().contains("ReferenceError"), "got: {}", err.message());
 }
 
 #[test]
@@ -97,9 +87,8 @@ fn eval_async_resolved() {
 #[test]
 fn eval_async_function() {
     let ctx = test_ctx();
-    let val = ctx
-        .eval_async("(async () => { return 'async works'; })()")
-        .unwrap();
+    let val =
+        ctx.eval_async("(async () => { return 'async works'; })()").unwrap();
     assert_eq!(val.to_string_lossy(), "async works");
 }
 
@@ -307,9 +296,7 @@ fn object_call_function() {
 fn object_call_method() {
     let ctx = test_ctx();
     let val = ctx
-        .eval(concat!(
-            "({value: 10, double() { return this.value * 2; }})"
-        ))
+        .eval(concat!("({value: 10, double() { return this.value * 2; }})"))
         .unwrap();
     let obj = val.to_object(&ctx).unwrap();
 
@@ -343,9 +330,7 @@ fn register_fn_returns_string() {
 #[test]
 fn register_fn_error() {
     let ctx = test_ctx();
-    ctx.register_fn("fail", |_ctx, _args| {
-        Err("something went wrong".into())
-    });
+    ctx.register_fn("fail", |_ctx, _args| Err("something went wrong".into()));
     let err = ctx.eval("fail()").unwrap_err();
     assert!(
         err.message().contains("something went wrong"),
@@ -357,9 +342,7 @@ fn register_fn_error() {
 #[test]
 fn register_fn_no_args() {
     let ctx = test_ctx();
-    ctx.register_fn("forty_two", |ctx, _args| {
-        Ok(JsValue::from_f64(ctx, 42.0))
-    });
+    ctx.register_fn("forty_two", |ctx, _args| Ok(JsValue::from_f64(ctx, 42.0)));
     let result = ctx.eval("forty_two()").unwrap();
     assert_eq!(result.to_number(), 42.0);
 }
@@ -376,4 +359,148 @@ fn register_fn_called_from_js_function() {
     assert_eq!(arr.get_index(0, &ctx).unwrap().to_number(), 2.0);
     assert_eq!(arr.get_index(1, &ctx).unwrap().to_number(), 4.0);
     assert_eq!(arr.get_index(2, &ctx).unwrap().to_number(), 6.0);
+}
+
+#[crate::function]
+fn macro_add<'a>(ctx: &'a JsContext, a: f64, b: f64) -> JsValue<'a> {
+    JsValue::from_f64(ctx, a + b)
+}
+
+#[crate::function]
+async fn macro_async_add(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+#[crate::function]
+async fn macro_async_jsvalue<'a>(
+    ctx: &'a JsContext,
+    val: JsValue<'a>,
+) -> JsValue<'a> {
+    let doubled = val.to_number() * 2.0;
+    JsValue::from_f64(ctx, doubled)
+}
+
+#[crate::function]
+async fn macro_async_jsobject<'a>(
+    ctx: &'a JsContext,
+) -> Result<JsObject<'a>, String> {
+    let val = ctx
+        .eval("({answer: 42, label: 'ok'})")
+        .map_err(|e| e.message().to_string())?;
+    val.to_object(ctx).map_err(|e| e.message().to_string())
+}
+
+#[crate::function]
+async fn macro_async_result<'a>(
+    ctx: &'a JsContext,
+    ok: bool,
+) -> Result<JsValue<'a>, String> {
+    if ok {
+        Ok(JsValue::from_str(ctx, "done"))
+    } else {
+        Err("nope".into())
+    }
+}
+
+#[crate::function]
+async fn macro_async_obj_arg(ctx: &JsContext, obj: JsObject<'_>) -> f64 {
+    obj.get("n", ctx).unwrap().to_number()
+}
+
+#[test]
+fn macro_sync_function() {
+    let ctx = test_ctx();
+    register_macro_add(&ctx);
+    let val = ctx.eval("macro_add(2, 3)").unwrap();
+    assert_eq!(val.to_number(), 5.0);
+}
+
+#[test]
+fn macro_async_returns_promise() {
+    let ctx = test_ctx();
+    register_macro_async_add(&ctx);
+    let val = ctx.eval("macro_async_add(5, 7)").unwrap();
+    let promise = val.to_promise(&ctx).unwrap();
+
+    let mut fut = Box::pin(promise.into_future(&ctx));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+    let completed = ctx.poll_async();
+    assert_eq!(completed, 1);
+    let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+    assert_eq!(val.to_number(), 12.0);
+}
+
+#[test]
+fn macro_async_jsvalue_roundtrip() {
+    let ctx = test_ctx();
+    register_macro_async_jsvalue(&ctx);
+    let val = ctx.eval("macro_async_jsvalue(6)").unwrap();
+    let promise = val.to_promise(&ctx).unwrap();
+
+    let mut fut = Box::pin(promise.into_future(&ctx));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+    assert_eq!(ctx.poll_async(), 1);
+    let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+    assert_eq!(val.to_number(), 12.0);
+}
+
+#[test]
+fn macro_async_jsobject_result() {
+    let ctx = test_ctx();
+    register_macro_async_jsobject(&ctx);
+    let val = ctx.eval("macro_async_jsobject()").unwrap();
+    let promise = val.to_promise(&ctx).unwrap();
+
+    let mut fut = Box::pin(promise.into_future(&ctx));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+    assert_eq!(ctx.poll_async(), 1);
+    let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+    let obj = val.to_object(&ctx).unwrap();
+    let answer = obj.get("answer", &ctx).unwrap();
+    assert_eq!(answer.to_number(), 42.0);
+    let label = obj.get("label", &ctx).unwrap();
+    assert_eq!(label.to_string_lossy(), "ok");
+}
+
+#[test]
+fn macro_async_result_rejects() {
+    let ctx = test_ctx();
+    register_macro_async_result(&ctx);
+    let val = ctx.eval("macro_async_result(false)").unwrap();
+    let promise = val.to_promise(&ctx).unwrap();
+
+    let mut fut = Box::pin(promise.into_future(&ctx));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+    assert_eq!(ctx.poll_async(), 1);
+    let err = poll_promise_future(fut.as_mut(), &ctx).unwrap_err();
+    assert_eq!(err.message(), "nope");
+}
+
+#[test]
+fn macro_async_obj_arg_promise() {
+    let ctx = test_ctx();
+    register_macro_async_obj_arg(&ctx);
+    let val = ctx.eval("macro_async_obj_arg({n: 9})").unwrap();
+    let promise = val.to_promise(&ctx).unwrap();
+
+    let mut fut = Box::pin(promise.into_future(&ctx));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+    assert_eq!(ctx.poll_async(), 1);
+    let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+    assert_eq!(val.to_number(), 9.0);
 }

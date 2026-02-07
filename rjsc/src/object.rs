@@ -1,5 +1,5 @@
-use std::marker::PhantomData;
 use std::ptr;
+use std::{fmt::Debug, marker::PhantomData};
 
 use rjsc_sys::*;
 
@@ -242,7 +242,7 @@ impl Drop for JsObject<'_> {
     }
 }
 
-impl std::fmt::Debug for JsObject<'_> {
+impl Debug for JsObject<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JsObject")
             .field("properties", &self.property_names())

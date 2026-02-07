@@ -5,3 +5,4 @@
 - Main entities should show up first on file (e.g. main() goes on top)
 - No excessive commenting
 - Imports at the start of the file unless there's a conflict
+- Every public API must be covered with tests

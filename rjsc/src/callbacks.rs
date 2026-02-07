@@ -1,21 +1,20 @@
 use std::mem;
 use std::ptr;
+use std::rc::Rc;
 
 use rjsc_sys::*;
 
-use crate::js_string_from_rust;
-use crate::JsContext;
-use crate::JsValue;
+use crate::{js_string_from_rust, JsContext, JsValue};
 
-pub(crate) type RustCallback =
-    dyn for<'a> Fn(&'a JsContext, &[JsValue<'a>]) -> Result<JsValue<'a>, String>
-        + 'static;
+pub(crate) type RustCallback = dyn for<'a> Fn(&'a JsContext, &[JsValue<'a>]) -> Result<JsValue<'a>, String>
+    + 'static;
 
 pub(crate) type RawCb =
     dyn Fn(JSContextRef, *const JSValueRef) -> JSValueRef + 'static;
 
 pub(crate) struct CallbackHolder<T: ?Sized> {
     pub(crate) cb: Box<T>,
+    pub(crate) runtime: Option<Rc<crate::runtime::JsRuntimeInner>>,
 }
 
 pub(crate) unsafe extern "C" fn rust_callback_trampoline(
@@ -30,14 +29,13 @@ pub(crate) unsafe extern "C" fn rust_callback_trampoline(
     if private.is_null() {
         return unsafe { JSValueMakeUndefined(ctx) };
     }
-    let holder =
-        unsafe { &*(private as *const CallbackHolder<RustCallback>) };
+    let holder = unsafe { &*(private as *const CallbackHolder<RustCallback>) };
     let cb = &*holder.cb;
 
     let temp_ctx = std::mem::ManuallyDrop::new(JsContext {
         raw: ctx as JSGlobalContextRef,
         _not_send_sync: std::marker::PhantomData,
-        _runtime: None,
+        _runtime: holder.runtime.clone(),
     });
 
     let args: Vec<JsValue<'_>> = (0..argc)

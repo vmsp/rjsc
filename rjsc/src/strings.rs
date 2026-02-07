@@ -1,11 +1,9 @@
-use std::ffi::CStr;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use rjsc_sys::*;
 
 pub(crate) unsafe fn js_string_from_rust(s: &str) -> JSStringRef {
-    let c_string =
-        CString::new(s).expect("JS string contained interior NUL");
+    let c_string = CString::new(s).expect("JS string contained interior NUL");
     unsafe { JSStringCreateWithUTF8CString(c_string.as_ptr()) }
 }
 

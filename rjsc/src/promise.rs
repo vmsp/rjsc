@@ -183,6 +183,91 @@ impl<'ctx> JsPromiseResolver<'ctx> {
         let val = JsValue::from_str(ctx, message);
         self.reject(ctx, &val)
     }
+
+    #[doc(hidden)]
+    pub fn to_owned(&self, ctx: &'ctx JsContext) -> JsPromiseResolverOwned {
+        let resolve = self.resolve.raw;
+        let reject = self.reject.raw;
+        unsafe { JSValueProtect(ctx.as_ctx(), resolve) };
+        unsafe { JSValueProtect(ctx.as_ctx(), reject) };
+        JsPromiseResolverOwned { ctx: ctx.as_ctx(), resolve, reject }
+    }
+}
+
+#[doc(hidden)]
+pub struct JsPromiseResolverOwned {
+    ctx: JSContextRef,
+    resolve: JSObjectRef,
+    reject: JSObjectRef,
+}
+
+impl JsPromiseResolverOwned {
+    pub(crate) fn resolve(
+        &self,
+        ctx: &JsContext,
+        value: &JsValue<'_>,
+    ) -> Result<(), JsException> {
+        self.resolve_raw(ctx, value.raw)
+    }
+
+    pub(crate) fn resolve_raw(
+        &self,
+        ctx: &JsContext,
+        value: JSValueRef,
+    ) -> Result<(), JsException> {
+        let mut exception: JSValueRef = ptr::null();
+        let args = [value];
+        unsafe {
+            JSObjectCallAsFunction(
+                ctx.as_ctx(),
+                self.resolve,
+                ptr::null_mut(),
+                1,
+                args.as_ptr(),
+                &mut exception,
+            );
+        }
+        if !exception.is_null() {
+            return Err(JsException::from_jsvalue(ctx.as_ctx(), exception));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reject_str(
+        &self,
+        ctx: &JsContext,
+        message: &str,
+    ) -> Result<(), JsException> {
+        let js_msg = unsafe {
+            let s = crate::js_string_from_rust(message);
+            let v = JSValueMakeString(ctx.as_ctx(), s);
+            JSStringRelease(s);
+            v
+        };
+        let mut exception: JSValueRef = ptr::null();
+        let args = [js_msg];
+        unsafe {
+            JSObjectCallAsFunction(
+                ctx.as_ctx(),
+                self.reject,
+                ptr::null_mut(),
+                1,
+                args.as_ptr(),
+                &mut exception,
+            );
+        }
+        if !exception.is_null() {
+            return Err(JsException::from_jsvalue(ctx.as_ctx(), exception));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for JsPromiseResolverOwned {
+    fn drop(&mut self) {
+        unsafe { JSValueUnprotect(self.ctx, self.resolve) };
+        unsafe { JSValueUnprotect(self.ctx, self.reject) };
+    }
 }
 
 pub trait JsJobDriver {
