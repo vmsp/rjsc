@@ -28,10 +28,9 @@ impl<'ctx> JsPromise<'ctx> {
         value: JsValue<'ctx>,
     ) -> Result<Self, JsException> {
         if !value.is_object() {
-            return Err(JsException {
-                message: "Value is not an object; cannot be a promise."
-                    .to_string(),
-            });
+            return Err(JsException::new(
+                "Value is not an object; cannot be a promise.",
+            ));
         }
         let obj = value.to_object(ctx)?;
         Self::from_object(ctx, obj)
@@ -319,12 +318,11 @@ impl PromiseState {
         ctx: &'ctx JsContext,
     ) -> Result<JsValue<'ctx>, JsException> {
         if !self.settled.get() {
-            return Err(JsException {
-                message: "Promise did not settle synchronously. \
+            return Err(JsException::new(
+                "Promise did not settle synchronously. \
                     eval_async only supports promises that resolve \
-                    via microtasks (no pending I/O or timers)."
-                    .to_string(),
-            });
+                    via microtasks (no pending I/O or timers).",
+            ));
         }
 
         let rejected_raw = self.rejected.get();
@@ -396,17 +394,15 @@ fn ensure_thenable(
 ) -> Result<(), JsException> {
     let then_val = obj.get("then", ctx)?;
     if !then_val.is_object() {
-        return Err(JsException {
-            message: "Value is not thenable (missing Promise.then)."
-                .to_string(),
-        });
+        return Err(JsException::new(
+            "Value is not thenable (missing Promise.then).",
+        ));
     }
     let then_obj = then_val.to_object(ctx)?;
     if !then_obj.is_function() {
-        return Err(JsException {
-            message: "Value is not thenable (Promise.then not callable)."
-                .to_string(),
-        });
+        return Err(JsException::new(
+            "Value is not thenable (Promise.then not callable).",
+        ));
     }
     Ok(())
 }
