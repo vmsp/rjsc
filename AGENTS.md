@@ -1,5 +1,9 @@
 # AGENTS.md
 
+RJSC is a Rust wrapper for JavaScriptCore.
+
+## Constraints
+
 - 80 chars of max line length
 - 4-space indent
 - Main entities should show up first on file (e.g. main() goes on top)
