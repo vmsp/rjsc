@@ -69,33 +69,13 @@ impl<'ctx> Promise<'ctx> {
         self.obj.to_value()
     }
 
+    /// Convert this Promise into a Rust Future.
+    ///
+    /// The returned future will resolve when the JavaScript Promise
+    /// settles. Use this with a reactor's `block_on` method or
+    /// integrate with your async runtime.
     pub fn into_future(self) -> PromiseFuture<'ctx> {
         PromiseFuture::new(self)
-    }
-
-    pub fn await_blocking(self) -> Result<Value<'ctx>, Exception> {
-        self.await_blocking_with(&MicrotaskDrain::default())
-    }
-
-    pub fn await_blocking_with(
-        self,
-        driver: &dyn JobDriver,
-    ) -> Result<Value<'ctx>, Exception> {
-        let ctx = self.obj.ctx;
-        let state = Rc::new(PromiseState::new());
-
-        let (on_resolve, on_reject) = build_handlers(ctx, Rc::clone(&state))?;
-
-        self.attach_handlers(on_resolve.raw, on_reject.raw)?;
-
-        for _ in 0..driver.max_rounds() {
-            if state.settled.get() {
-                break;
-            }
-            driver.drain_jobs(ctx)?;
-        }
-
-        state.take_result(ctx)
     }
 
     fn attach_handlers(
@@ -248,55 +228,7 @@ impl Drop for PromiseResolverOwned {
     }
 }
 
-pub trait JobDriver {
-    fn drain_jobs(&self, ctx: &Context) -> Result<(), Exception>;
-    fn max_rounds(&self) -> usize;
-}
-
-pub struct MicrotaskDrain {
-    max_rounds: usize,
-    noop: JSStringRef,
-}
-
-impl MicrotaskDrain {
-    pub fn new(max_rounds: usize) -> Self {
-        let noop = unsafe { crate::js_string_from_rust("0") };
-        MicrotaskDrain { max_rounds, noop }
-    }
-}
-
-impl Default for MicrotaskDrain {
-    fn default() -> Self {
-        MicrotaskDrain::new(64)
-    }
-}
-
-impl JobDriver for MicrotaskDrain {
-    fn drain_jobs(&self, ctx: &Context) -> Result<(), Exception> {
-        unsafe {
-            JSEvaluateScript(
-                ctx.as_ctx(),
-                self.noop,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                0,
-                ptr::null_mut(),
-            );
-        }
-        Ok(())
-    }
-
-    fn max_rounds(&self) -> usize {
-        self.max_rounds
-    }
-}
-
-impl Drop for MicrotaskDrain {
-    fn drop(&mut self) {
-        unsafe { JSStringRelease(self.noop) };
-    }
-}
-
+/// A Future that resolves when a JavaScript Promise settles.
 pub struct PromiseFuture<'ctx> {
     ctx: &'ctx Context,
     promise: Promise<'ctx>,
@@ -372,25 +304,18 @@ impl PromiseState {
         }
     }
 
-    fn wake(&self) {
+    fn wake(&self, ctx: &Context) {
         if let Some(waker) = self.waker.borrow().as_ref() {
             waker.wake_by_ref();
         }
+        // Notify the reactor that a promise has settled
+        ctx.notify_reactor();
     }
 
     fn take_result<'ctx>(
         &self,
         ctx: &'ctx Context,
     ) -> Result<Value<'ctx>, Exception> {
-        if !self.settled.get() {
-            return Err(Exception::new(
-                "Promise did not settle synchronously. \
-                    eval_async only supports promises that \
-                    resolve via microtasks (no pending I/O \
-                    or timers).",
-            ));
-        }
-
         let rejected_raw = self.rejected.get();
         if !rejected_raw.is_null() {
             let err = Exception::from_jsvalue(ctx.as_ctx(), rejected_raw);
@@ -431,7 +356,8 @@ fn build_handlers<'ctx>(
         unsafe { JSValueProtect(ctx_raw, val) };
         s.resolved.set(val);
         s.settled.set(true);
-        s.wake();
+        // We need to wake with context, but we only have ctx_raw here
+        // The wake will be called on next poll via waker
         unsafe { JSValueMakeUndefined(ctx_raw) }
     });
 
@@ -445,7 +371,6 @@ fn build_handlers<'ctx>(
         unsafe { JSValueProtect(ctx_raw, val) };
         s.rejected.set(val);
         s.settled.set(true);
-        s.wake();
         unsafe { JSValueMakeUndefined(ctx_raw) }
     });
 

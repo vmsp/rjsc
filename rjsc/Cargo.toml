@@ -10,3 +10,4 @@ rjsc-macros = { path = "../rjsc-macros" }
 
 [dev-dependencies]
 futures = "0.3"
+smol = "2"

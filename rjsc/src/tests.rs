@@ -1,50 +1,34 @@
 use crate::*;
-use futures::task::noop_waker;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 
-fn test_ctx() -> Context {
-    let runtime = Runtime::new();
-    Context::new_in(&runtime)
+fn test_runtime() -> Runtime {
+    Runtime::default()
 }
 
-fn poll_promise_future<'ctx>(
-    mut fut: Pin<&mut PromiseFuture<'ctx>>,
-    ctx: &'ctx Context,
-) -> Result<Value<'ctx>, Exception> {
-    let waker = noop_waker();
-    let mut cx = TaskContext::from_waker(&waker);
-    let driver = MicrotaskDrain::default();
-
-    for _ in 0..driver.max_rounds() {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(result) => return result,
-            Poll::Pending => {
-                driver.drain_jobs(ctx)?;
-            }
-        }
-    }
-
-    Err(Exception::new("Future did not resolve within drain budget."))
+fn test_ctx() -> (Runtime, Context) {
+    let runtime = test_runtime();
+    let ctx = runtime.new_context();
+    (runtime, ctx)
 }
 
 #[test]
 fn eval_arithmetic() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = ctx.eval("1 + 2").unwrap();
     assert_eq!(val.to_number(), 3.0);
 }
 
 #[test]
 fn eval_string() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = ctx.eval("'hello' + ' world'").unwrap();
     assert_eq!(val.to_string_lossy(), "hello world");
 }
 
 #[test]
 fn eval_boolean() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = ctx.eval("true").unwrap();
     assert!(val.to_boolean());
 
@@ -54,7 +38,7 @@ fn eval_boolean() {
 
 #[test]
 fn eval_undefined_and_null() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
 
     let val = ctx.eval("undefined").unwrap();
     assert!(val.is_undefined());
@@ -65,115 +49,130 @@ fn eval_undefined_and_null() {
 
 #[test]
 fn eval_syntax_error() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let err = ctx.eval("let x = ").unwrap_err();
     assert!(err.message().contains("SyntaxError"), "got: {}", err.message());
 }
 
 #[test]
 fn eval_runtime_error() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let err = ctx.eval("nonexistent()").unwrap_err();
     assert!(err.message().contains("ReferenceError"), "got: {}", err.message());
 }
 
 #[test]
-fn eval_async_resolved() {
-    let ctx = test_ctx();
-    let val = ctx.eval_async("Promise.resolve(42)").unwrap();
+fn eval_promise_resolved() {
+    let (rt, ctx) = test_ctx();
+    let promise = ctx.eval_promise("Promise.resolve(42)").unwrap();
+    let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 42.0);
 }
 
 #[test]
-fn eval_async_function() {
-    let ctx = test_ctx();
-    let val =
-        ctx.eval_async("(async () => { return 'async works'; })()").unwrap();
+fn eval_promise_async_function() {
+    let (rt, ctx) = test_ctx();
+    let promise =
+        ctx.eval_promise("(async () => { return 'async works'; })()").unwrap();
+    let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_string_lossy(), "async works");
 }
 
 #[test]
-fn eval_async_rejected() {
-    let ctx = test_ctx();
-    let err = ctx.eval_async("Promise.reject('boom')").unwrap_err();
+fn eval_promise_rejected() {
+    let (rt, ctx) = test_ctx();
+    let promise = ctx.eval_promise("Promise.reject('boom')").unwrap();
+    let err = rt.block_on(&ctx, promise.into_future()).unwrap_err();
     assert_eq!(err.message(), "boom");
 }
 
 #[test]
-fn eval_async_chain() {
-    let ctx = test_ctx();
-    let val = ctx
-        .eval_async(concat!(
+fn eval_promise_chain() {
+    let (rt, ctx) = test_ctx();
+    let promise = ctx
+        .eval_promise(concat!(
             "Promise.resolve(10).then(x => x * 2).",
             "then(x => x + 1)"
         ))
         .unwrap();
+    let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 21.0);
 }
 
 #[test]
-fn eval_async_non_promise() {
-    let ctx = test_ctx();
-    let val = ctx.eval_async("42").unwrap();
+fn eval_promise_non_promise() {
+    let (_rt, ctx) = test_ctx();
+    let val = ctx.eval("42").unwrap();
     assert_eq!(val.to_number(), 42.0);
 }
 
 #[test]
 fn eval_promise_returns_promise() {
-    let ctx = test_ctx();
+    let (rt, ctx) = test_ctx();
     let promise = ctx.eval_promise("Promise.resolve(7)").unwrap();
-    let val = promise.await_blocking().unwrap();
+    let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 7.0);
 }
 
 #[test]
 fn value_to_promise() {
-    let ctx = test_ctx();
+    let (rt, ctx) = test_ctx();
     let val = ctx.eval("Promise.resolve(9)").unwrap();
     let promise = val.to_promise().unwrap();
-    let val = promise.await_blocking().unwrap();
+    let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 9.0);
 }
 
 #[test]
 fn promise_deferred_resolve() {
-    let ctx = test_ctx();
+    let (rt, ctx) = test_ctx();
     let (promise, resolver) = Promise::deferred(&ctx).unwrap();
     let mut fut = Box::pin(promise.into_future());
-    let waker = noop_waker();
+
+    // Poll once to register handlers
+    let waker = futures::task::noop_waker();
     let mut cx = TaskContext::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+    // Resolve the promise
     let value = Value::from_str(&ctx, "done");
     resolver.resolve(&value).unwrap();
-    let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+
+    // Now it should complete
+    let val = rt.block_on(&ctx, fut).unwrap();
     assert_eq!(val.to_string_lossy(), "done");
 }
 
 #[test]
 fn promise_deferred_reject() {
-    let ctx = test_ctx();
+    let (rt, ctx) = test_ctx();
     let (promise, resolver) = Promise::deferred(&ctx).unwrap();
     let mut fut = Box::pin(promise.into_future());
-    let waker = noop_waker();
+
+    // Poll once to register handlers
+    let waker = futures::task::noop_waker();
     let mut cx = TaskContext::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+    // Reject the promise
     resolver.reject_str("nope").unwrap();
-    let err = poll_promise_future(fut.as_mut(), &ctx).unwrap_err();
+
+    // Now it should fail
+    let err = rt.block_on(&ctx, fut).unwrap_err();
     assert_eq!(err.message(), "nope");
 }
 
 #[test]
 fn promise_into_future() {
-    let ctx = test_ctx();
+    let (rt, ctx) = test_ctx();
     let promise = ctx.eval_promise("Promise.resolve(123)").unwrap();
-    let mut fut = Box::pin(promise.into_future());
-    let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
+    let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 123.0);
 }
 
 #[test]
 fn value_undefined() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = Value::undefined(&ctx);
     assert!(val.is_undefined());
     assert!(!val.is_null());
@@ -182,7 +181,7 @@ fn value_undefined() {
 
 #[test]
 fn value_null() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = Value::null(&ctx);
     assert!(val.is_null());
     assert!(!val.is_undefined());
@@ -191,7 +190,7 @@ fn value_null() {
 
 #[test]
 fn value_from_bool() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let t = Value::from_bool(&ctx, true);
     assert!(t.is_boolean());
     assert!(t.to_boolean());
@@ -203,7 +202,7 @@ fn value_from_bool() {
 
 #[test]
 fn value_from_f64() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = Value::from_f64(&ctx, 3.14);
     assert!(val.is_number());
     assert!((val.to_number() - 3.14).abs() < f64::EPSILON);
@@ -211,7 +210,7 @@ fn value_from_f64() {
 
 #[test]
 fn value_from_str() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = Value::from_str(&ctx, "hello from rust");
     assert!(val.is_string());
     assert_eq!(val.to_string_lossy(), "hello from rust");
@@ -219,7 +218,7 @@ fn value_from_str() {
 
 #[test]
 fn object_new_and_properties() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let obj = Object::new(&ctx);
 
     assert!(!obj.has("foo"));
@@ -237,7 +236,7 @@ fn object_new_and_properties() {
 
 #[test]
 fn object_delete_property() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let obj = Object::new(&ctx);
     let val = Value::from_str(&ctx, "bar");
     obj.set("x", &val).unwrap();
@@ -250,7 +249,7 @@ fn object_delete_property() {
 
 #[test]
 fn object_index_access() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let arr = ctx.eval("[10, 20, 30]").unwrap();
     let arr_obj = arr.to_object().unwrap();
 
@@ -268,7 +267,7 @@ fn object_index_access() {
 
 #[test]
 fn object_from_eval() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = ctx.eval("({a: 1, b: 'two'})").unwrap();
     let obj = val.to_object().unwrap();
 
@@ -281,7 +280,7 @@ fn object_from_eval() {
 
 #[test]
 fn object_call_function() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let func_val = ctx.eval("(function(x) { return x * 2; })").unwrap();
     let func = func_val.to_object().unwrap();
 
@@ -294,7 +293,7 @@ fn object_call_function() {
 
 #[test]
 fn object_call_method() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let val = ctx
         .eval(concat!("({value: 10, double() ", "{ return this.value * 2; }})"))
         .unwrap();
@@ -306,7 +305,7 @@ fn object_call_method() {
 
 #[test]
 fn global_set_function_basic() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     fn make_add(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -323,7 +322,7 @@ fn global_set_function_basic() {
 
 #[test]
 fn global_set_function_returns_string() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     fn make_greet(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -339,7 +338,7 @@ fn global_set_function_returns_string() {
 
 #[test]
 fn global_set_function_error() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     fn make_fail(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -356,7 +355,7 @@ fn global_set_function_error() {
 
 #[test]
 fn global_set_function_no_args() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     fn make_forty_two(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -369,7 +368,7 @@ fn global_set_function_no_args() {
 
 #[test]
 fn global_set_function_called_from_js_function() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     fn make_double(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -388,7 +387,7 @@ fn global_set_function_called_from_js_function() {
 
 #[test]
 fn global_set_primitives() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let global = ctx.global();
 
     global.set("myBool", true).unwrap();
@@ -406,7 +405,7 @@ fn global_set_primitives() {
 
 #[test]
 fn global_set_function() {
-    let ctx = test_ctx();
+    let (_rt, ctx) = test_ctx();
     let global = ctx.global();
 
     fn make_add(
@@ -422,4 +421,100 @@ fn global_set_function() {
 
     let result = ctx.eval("add(5, 7)").unwrap();
     assert_eq!(result.to_number(), 12.0);
+}
+
+// ========== Reactor Integration Tests ==========
+
+/// A custom reactor implementation using smol for testing.
+#[cfg(test)]
+mod reactor_tests {
+    use super::*;
+    use std::ptr;
+    use std::sync::Arc;
+
+    /// A reactor that integrates with smol for async I/O.
+    pub struct SmolReactor {
+        noop: rjsc_sys::JSStringRef,
+        notified: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SmolReactor {
+        pub fn new() -> Self {
+            let noop = unsafe { crate::js_string_from_rust("0") };
+            SmolReactor {
+                noop,
+                notified: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn drain_microtasks(&self, ctx: &Context) {
+            unsafe {
+                rjsc_sys::JSEvaluateScript(
+                    ctx.as_ctx(),
+                    self.noop,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    impl Reactor for SmolReactor {
+        fn poll(&self, ctx: &Context) -> Result<PollStatus, Exception> {
+            self.drain_microtasks(ctx);
+            Ok(PollStatus::Ready)
+        }
+
+        fn notify(&self) {
+            self.notified.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    impl Drop for SmolReactor {
+        fn drop(&mut self) {
+            unsafe { rjsc_sys::JSStringRelease(self.noop) };
+        }
+    }
+
+    #[test]
+    fn test_with_smol_reactor() {
+        let reactor = Box::new(SmolReactor::new());
+        let runtime = Runtime::new(reactor);
+        let ctx = runtime.new_context();
+
+        let promise = ctx.eval_promise("Promise.resolve(42)").unwrap();
+        let val = runtime.block_on(&ctx, promise.into_future()).unwrap();
+        assert_eq!(val.to_number(), 42.0);
+    }
+
+    #[test]
+    fn test_smol_reactor_with_async_fn() {
+        let reactor = Box::new(SmolReactor::new());
+        let runtime = Runtime::new(reactor);
+        let ctx = runtime.new_context();
+
+        let promise = ctx
+            .eval_promise("(async () => { return 'from smol'; })()")
+            .unwrap();
+        let val = runtime.block_on(&ctx, promise.into_future()).unwrap();
+        assert_eq!(val.to_string_lossy(), "from smol");
+    }
+
+    #[test]
+    fn test_smol_reactor_with_chain() {
+        let reactor = Box::new(SmolReactor::new());
+        let runtime = Runtime::new(reactor);
+        let ctx = runtime.new_context();
+
+        let promise =
+            ctx.eval_promise("Promise.resolve(5).then(x => x * 3)").unwrap();
+        let val = runtime.block_on(&ctx, promise.into_future()).unwrap();
+        assert_eq!(val.to_number(), 15.0);
+    }
 }

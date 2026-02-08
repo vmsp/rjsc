@@ -1,7 +1,7 @@
 use rjsc::{function, Context, Runtime};
 
 fn test_ctx() -> Context {
-    let runtime = Runtime::new();
+    let runtime = Runtime::default();
     Context::new_in(&runtime)
 }
 

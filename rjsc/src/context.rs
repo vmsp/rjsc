@@ -57,36 +57,10 @@ impl Context {
         Ok(unsafe { Value::from_raw(self, result) })
     }
 
-    /// Evaluates JavaScript code and, if it returns a promise,
-    /// resolves it.
-    ///
-    /// This is a blocking helper that uses the default microtask
-    /// drain driver. Use [`Promise::into_future`] for
-    /// non-blocking integration.
-    pub fn eval_async(&self, code: &str) -> Result<Value<'_>, Exception> {
-        let value = self.eval(code)?;
-        if !value.is_object() {
-            return Ok(value);
-        }
-
-        let raw = value.raw;
-        match Promise::from_value(value) {
-            Ok(promise) => promise.await_blocking(),
-            Err(_) => Ok(unsafe { Value::from_raw(self, raw) }),
-        }
-    }
-
     /// Evaluates JavaScript code expected to return a promise.
     pub fn eval_promise(&self, code: &str) -> Result<Promise<'_>, Exception> {
         let value = self.eval(code)?;
         Promise::from_value(value)
-    }
-
-    pub fn poll_async(&self) -> usize {
-        match &self._runtime {
-            Some(runtime) => runtime.poll_async(self),
-            None => 0,
-        }
     }
 
     /// Returns the global object.
@@ -146,6 +120,21 @@ impl Context {
         let obj = unsafe { JSObjectMake(self.raw, class, private) };
         unsafe { JSClassRelease(class) };
         obj
+    }
+
+    /// Access the reactor for this context's runtime.
+    ///
+    /// Returns None if this is a detached context without a runtime.
+    pub(crate) fn with_reactor<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&dyn crate::reactor::Reactor) -> R,
+    {
+        self._runtime.as_ref().map(|rt| rt.with_reactor(f))
+    }
+
+    /// Notify the reactor that a promise has been settled.
+    pub(crate) fn notify_reactor(&self) {
+        self.with_reactor(|r| r.notify());
     }
 
     /// Returns the raw `JSGlobalContextRef`.

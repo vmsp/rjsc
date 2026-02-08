@@ -5,6 +5,7 @@ mod into_js;
 mod object;
 mod owned;
 mod promise;
+mod reactor;
 mod runtime;
 mod strings;
 mod task;
@@ -17,9 +18,8 @@ pub use context::Context;
 pub use exception::Exception;
 pub use into_js::IntoJs;
 pub use object::Object;
-pub use promise::{
-    JobDriver, MicrotaskDrain, Promise, PromiseFuture, PromiseResolver,
-};
+pub use promise::{Promise, PromiseFuture, PromiseResolver};
+pub use reactor::{MicrotaskReactor, PollStatus, Reactor};
 pub use runtime::Runtime;
 pub use value::Value;
 
