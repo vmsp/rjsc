@@ -6,18 +6,18 @@ use rjsc_sys::*;
 
 /// A JavaScript runtime (context group).
 ///
-/// Contexts created from the same runtime share a VM and must remain on the
-/// same thread.
-pub struct JsRuntime {
-    inner: Rc<JsRuntimeInner>,
+/// Contexts created from the same runtime share a VM and
+/// must remain on the same thread.
+pub struct Runtime {
+    inner: Rc<RuntimeInner>,
 }
 
-impl JsRuntime {
+impl Runtime {
     /// Creates a new JavaScript runtime (context group).
     pub fn new() -> Self {
         let raw = unsafe { JSContextGroupCreate() };
-        JsRuntime {
-            inner: Rc::new(JsRuntimeInner {
+        Runtime {
+            inner: Rc::new(RuntimeInner {
                 raw,
                 tasks: RefCell::new(VecDeque::new()),
             }),
@@ -29,36 +29,36 @@ impl JsRuntime {
     }
 
     /// Creates a new context inside this runtime.
-    pub fn new_context(&self) -> crate::JsContext {
-        crate::JsContext::new_in(self)
+    pub fn new_context(&self) -> crate::Context {
+        crate::Context::new_in(self)
     }
 
-    pub(crate) fn inner_clone(&self) -> Rc<JsRuntimeInner> {
+    pub(crate) fn inner_clone(&self) -> Rc<RuntimeInner> {
         Rc::clone(&self.inner)
     }
 
-    pub fn poll_async(&self, ctx: &crate::JsContext) -> usize {
+    pub fn poll_async(&self, ctx: &crate::Context) -> usize {
         self.inner.poll_async(ctx)
     }
 }
 
-impl Default for JsRuntime {
+impl Default for Runtime {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub(crate) struct JsRuntimeInner {
+pub(crate) struct RuntimeInner {
     raw: JSContextGroupRef,
     tasks: RefCell<VecDeque<crate::task::Task>>,
 }
 
-impl JsRuntimeInner {
+impl RuntimeInner {
     pub(crate) fn push_task(&self, task: crate::task::Task) {
         self.tasks.borrow_mut().push_back(task);
     }
 
-    pub(crate) fn poll_async(&self, ctx: &crate::JsContext) -> usize {
+    pub(crate) fn poll_async(&self, ctx: &crate::Context) -> usize {
         let mut pending = self.tasks.borrow_mut();
         let mut completed = 0usize;
         let mut remaining = VecDeque::new();
@@ -75,7 +75,7 @@ impl JsRuntimeInner {
     }
 }
 
-impl Drop for JsRuntimeInner {
+impl Drop for RuntimeInner {
     fn drop(&mut self) {
         unsafe { JSContextGroupRelease(self.raw) };
     }

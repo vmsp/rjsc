@@ -3,29 +3,27 @@ use std::future::Future;
 use std::pin::Pin;
 use std::ptr;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context as TaskContext, Poll, Waker};
 
 use rjsc_sys::*;
 
-use crate::{JsContext, JsException, JsObject, JsValue};
+use crate::{Context, Exception, Object, Value};
 
 /// A JavaScript Promise, tied to the lifetime of its
-/// [`JsContext`].
-pub struct JsPromise<'ctx> {
-    obj: JsObject<'ctx>,
+/// [`Context`].
+pub struct Promise<'ctx> {
+    obj: Object<'ctx>,
 }
 
-impl<'ctx> JsPromise<'ctx> {
-    pub(crate) fn from_object(
-        obj: JsObject<'ctx>,
-    ) -> Result<Self, JsException> {
+impl<'ctx> Promise<'ctx> {
+    pub(crate) fn from_object(obj: Object<'ctx>) -> Result<Self, Exception> {
         ensure_thenable(&obj)?;
         Ok(Self { obj })
     }
 
-    pub fn from_value(value: JsValue<'ctx>) -> Result<Self, JsException> {
+    pub fn from_value(value: Value<'ctx>) -> Result<Self, Exception> {
         if !value.is_object() {
-            return Err(JsException::new(
+            return Err(Exception::new(
                 "Value is not an object; cannot be a promise.",
             ));
         }
@@ -34,8 +32,8 @@ impl<'ctx> JsPromise<'ctx> {
     }
 
     pub fn deferred(
-        ctx: &'ctx JsContext,
-    ) -> Result<(Self, JsPromiseResolver<'ctx>), JsException> {
+        ctx: &'ctx Context,
+    ) -> Result<(Self, PromiseResolver<'ctx>), Exception> {
         let init = "(function() {\
             let resolve; \
             let reject; \
@@ -53,36 +51,36 @@ impl<'ctx> JsPromise<'ctx> {
         let resolve_val = obj.get("resolve")?;
         let reject_val = obj.get("reject")?;
 
-        let promise = JsPromise::from_value(promise_val)?;
+        let promise = Promise::from_value(promise_val)?;
         let resolve_obj = resolve_val.to_object()?;
         let reject_obj = reject_val.to_object()?;
 
         let resolver =
-            JsPromiseResolver { resolve: resolve_obj, reject: reject_obj };
+            PromiseResolver { resolve: resolve_obj, reject: reject_obj };
 
         Ok((promise, resolver))
     }
 
-    pub fn to_object(&self) -> &JsObject<'ctx> {
+    pub fn to_object(&self) -> &Object<'ctx> {
         &self.obj
     }
 
-    pub fn to_value(&self) -> JsValue<'ctx> {
+    pub fn to_value(&self) -> Value<'ctx> {
         self.obj.to_value()
     }
 
-    pub fn into_future(self) -> JsPromiseFuture<'ctx> {
-        JsPromiseFuture::new(self)
+    pub fn into_future(self) -> PromiseFuture<'ctx> {
+        PromiseFuture::new(self)
     }
 
-    pub fn await_blocking(self) -> Result<JsValue<'ctx>, JsException> {
-        self.await_blocking_with(&JsMicrotaskDrain::default())
+    pub fn await_blocking(self) -> Result<Value<'ctx>, Exception> {
+        self.await_blocking_with(&MicrotaskDrain::default())
     }
 
     pub fn await_blocking_with(
         self,
-        driver: &dyn JsJobDriver,
-    ) -> Result<JsValue<'ctx>, JsException> {
+        driver: &dyn JobDriver,
+    ) -> Result<Value<'ctx>, Exception> {
         let ctx = self.obj.ctx;
         let state = Rc::new(PromiseState::new());
 
@@ -104,7 +102,7 @@ impl<'ctx> JsPromise<'ctx> {
         &self,
         on_resolve: JSObjectRef,
         on_reject: JSObjectRef,
-    ) -> Result<(), JsException> {
+    ) -> Result<(), Exception> {
         let ctx = self.obj.ctx;
         let promise_obj = unsafe {
             JSValueToObject(ctx.as_ctx(), self.obj.raw, ptr::null_mut())
@@ -137,64 +135,64 @@ impl<'ctx> JsPromise<'ctx> {
     }
 }
 
-pub struct JsPromiseResolver<'ctx> {
-    resolve: JsObject<'ctx>,
-    reject: JsObject<'ctx>,
+pub struct PromiseResolver<'ctx> {
+    resolve: Object<'ctx>,
+    reject: Object<'ctx>,
 }
 
-impl<'ctx> JsPromiseResolver<'ctx> {
-    pub fn resolve(&self, value: &JsValue<'ctx>) -> Result<(), JsException> {
+impl<'ctx> PromiseResolver<'ctx> {
+    pub fn resolve(&self, value: &Value<'ctx>) -> Result<(), Exception> {
         self.resolve.call(None, &[value])?;
         Ok(())
     }
 
-    pub fn resolve_undefined(&self) -> Result<(), JsException> {
-        let val = JsValue::undefined(self.resolve.ctx);
+    pub fn resolve_undefined(&self) -> Result<(), Exception> {
+        let val = Value::undefined(self.resolve.ctx);
         self.resolve(&val)
     }
 
-    pub fn reject(&self, value: &JsValue<'ctx>) -> Result<(), JsException> {
+    pub fn reject(&self, value: &Value<'ctx>) -> Result<(), Exception> {
         self.reject.call(None, &[value])?;
         Ok(())
     }
 
-    pub fn reject_str(&self, message: &str) -> Result<(), JsException> {
-        let val = JsValue::from_str(self.resolve.ctx, message);
+    pub fn reject_str(&self, message: &str) -> Result<(), Exception> {
+        let val = Value::from_str(self.resolve.ctx, message);
         self.reject(&val)
     }
 
     #[doc(hidden)]
-    pub fn to_owned(&self) -> JsPromiseResolverOwned {
+    pub fn to_owned(&self) -> PromiseResolverOwned {
         let ctx = self.resolve.ctx;
         let resolve = self.resolve.raw;
         let reject = self.reject.raw;
         unsafe { JSValueProtect(ctx.as_ctx(), resolve) };
         unsafe { JSValueProtect(ctx.as_ctx(), reject) };
-        JsPromiseResolverOwned { ctx: ctx.as_ctx(), resolve, reject }
+        PromiseResolverOwned { ctx: ctx.as_ctx(), resolve, reject }
     }
 }
 
 #[doc(hidden)]
-pub struct JsPromiseResolverOwned {
+pub struct PromiseResolverOwned {
     ctx: JSContextRef,
     resolve: JSObjectRef,
     reject: JSObjectRef,
 }
 
-impl JsPromiseResolverOwned {
+impl PromiseResolverOwned {
     pub(crate) fn resolve(
         &self,
-        ctx: &JsContext,
-        value: &JsValue<'_>,
-    ) -> Result<(), JsException> {
+        ctx: &Context,
+        value: &Value<'_>,
+    ) -> Result<(), Exception> {
         self.resolve_raw(ctx, value.raw)
     }
 
     pub(crate) fn resolve_raw(
         &self,
-        ctx: &JsContext,
+        ctx: &Context,
         value: JSValueRef,
-    ) -> Result<(), JsException> {
+    ) -> Result<(), Exception> {
         let mut exception: JSValueRef = ptr::null();
         let args = [value];
         unsafe {
@@ -208,16 +206,16 @@ impl JsPromiseResolverOwned {
             );
         }
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(ctx.as_ctx(), exception));
+            return Err(Exception::from_jsvalue(ctx.as_ctx(), exception));
         }
         Ok(())
     }
 
     pub(crate) fn reject_str(
         &self,
-        ctx: &JsContext,
+        ctx: &Context,
         message: &str,
-    ) -> Result<(), JsException> {
+    ) -> Result<(), Exception> {
         let js_msg = unsafe {
             let s = crate::js_string_from_rust(message);
             let v = JSValueMakeString(ctx.as_ctx(), s);
@@ -237,44 +235,44 @@ impl JsPromiseResolverOwned {
             );
         }
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(ctx.as_ctx(), exception));
+            return Err(Exception::from_jsvalue(ctx.as_ctx(), exception));
         }
         Ok(())
     }
 }
 
-impl Drop for JsPromiseResolverOwned {
+impl Drop for PromiseResolverOwned {
     fn drop(&mut self) {
         unsafe { JSValueUnprotect(self.ctx, self.resolve) };
         unsafe { JSValueUnprotect(self.ctx, self.reject) };
     }
 }
 
-pub trait JsJobDriver {
-    fn drain_jobs(&self, ctx: &JsContext) -> Result<(), JsException>;
+pub trait JobDriver {
+    fn drain_jobs(&self, ctx: &Context) -> Result<(), Exception>;
     fn max_rounds(&self) -> usize;
 }
 
-pub struct JsMicrotaskDrain {
+pub struct MicrotaskDrain {
     max_rounds: usize,
     noop: JSStringRef,
 }
 
-impl JsMicrotaskDrain {
+impl MicrotaskDrain {
     pub fn new(max_rounds: usize) -> Self {
         let noop = unsafe { crate::js_string_from_rust("0") };
-        JsMicrotaskDrain { max_rounds, noop }
+        MicrotaskDrain { max_rounds, noop }
     }
 }
 
-impl Default for JsMicrotaskDrain {
+impl Default for MicrotaskDrain {
     fn default() -> Self {
-        JsMicrotaskDrain::new(64)
+        MicrotaskDrain::new(64)
     }
 }
 
-impl JsJobDriver for JsMicrotaskDrain {
-    fn drain_jobs(&self, ctx: &JsContext) -> Result<(), JsException> {
+impl JobDriver for MicrotaskDrain {
+    fn drain_jobs(&self, ctx: &Context) -> Result<(), Exception> {
         unsafe {
             JSEvaluateScript(
                 ctx.as_ctx(),
@@ -293,25 +291,25 @@ impl JsJobDriver for JsMicrotaskDrain {
     }
 }
 
-impl Drop for JsMicrotaskDrain {
+impl Drop for MicrotaskDrain {
     fn drop(&mut self) {
         unsafe { JSStringRelease(self.noop) };
     }
 }
 
-pub struct JsPromiseFuture<'ctx> {
-    ctx: &'ctx JsContext,
-    promise: JsPromise<'ctx>,
+pub struct PromiseFuture<'ctx> {
+    ctx: &'ctx Context,
+    promise: Promise<'ctx>,
     state: Rc<PromiseState>,
     registered: bool,
-    on_resolve: Option<JsObject<'ctx>>,
-    on_reject: Option<JsObject<'ctx>>,
+    on_resolve: Option<Object<'ctx>>,
+    on_reject: Option<Object<'ctx>>,
 }
 
-impl<'ctx> JsPromiseFuture<'ctx> {
-    fn new(promise: JsPromise<'ctx>) -> Self {
+impl<'ctx> PromiseFuture<'ctx> {
+    fn new(promise: Promise<'ctx>) -> Self {
         let ctx = promise.obj.ctx;
-        JsPromiseFuture {
+        PromiseFuture {
             ctx,
             promise,
             state: Rc::new(PromiseState::new()),
@@ -322,10 +320,13 @@ impl<'ctx> JsPromiseFuture<'ctx> {
     }
 }
 
-impl<'ctx> Future for JsPromiseFuture<'ctx> {
-    type Output = Result<JsValue<'ctx>, JsException>;
+impl<'ctx> Future for PromiseFuture<'ctx> {
+    type Output = Result<Value<'ctx>, Exception>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.state.waker.replace(Some(cx.waker().clone()));
 
@@ -379,10 +380,10 @@ impl PromiseState {
 
     fn take_result<'ctx>(
         &self,
-        ctx: &'ctx JsContext,
-    ) -> Result<JsValue<'ctx>, JsException> {
+        ctx: &'ctx Context,
+    ) -> Result<Value<'ctx>, Exception> {
         if !self.settled.get() {
-            return Err(JsException::new(
+            return Err(Exception::new(
                 "Promise did not settle synchronously. \
                     eval_async only supports promises that \
                     resolve via microtasks (no pending I/O \
@@ -392,14 +393,14 @@ impl PromiseState {
 
         let rejected_raw = self.rejected.get();
         if !rejected_raw.is_null() {
-            let err = JsException::from_jsvalue(ctx.as_ctx(), rejected_raw);
+            let err = Exception::from_jsvalue(ctx.as_ctx(), rejected_raw);
             unsafe { JSValueUnprotect(ctx.as_ctx(), rejected_raw) };
             self.rejected.set(ptr::null());
             return Err(err);
         }
 
         let resolved_raw = self.resolved.get();
-        let result = unsafe { JsValue::from_raw(ctx, resolved_raw) };
+        let result = unsafe { Value::from_raw(ctx, resolved_raw) };
         unsafe { JSValueUnprotect(ctx.as_ctx(), resolved_raw) };
         self.resolved.set(ptr::null());
         Ok(result)
@@ -407,8 +408,8 @@ impl PromiseState {
 
     fn poll_result<'ctx>(
         &self,
-        ctx: &'ctx JsContext,
-    ) -> Option<Result<JsValue<'ctx>, JsException>> {
+        ctx: &'ctx Context,
+    ) -> Option<Result<Value<'ctx>, Exception>> {
         if !self.settled.get() {
             return None;
         }
@@ -417,9 +418,9 @@ impl PromiseState {
 }
 
 fn build_handlers<'ctx>(
-    ctx: &'ctx JsContext,
+    ctx: &'ctx Context,
     state: Rc<PromiseState>,
-) -> Result<(JsObject<'ctx>, JsObject<'ctx>), JsException> {
+) -> Result<(Object<'ctx>, Object<'ctx>), Exception> {
     let s = Rc::clone(&state);
     let on_resolve = ctx.make_callback(move |ctx_raw, args| {
         let val = if args.is_null() {
@@ -448,21 +449,21 @@ fn build_handlers<'ctx>(
         unsafe { JSValueMakeUndefined(ctx_raw) }
     });
 
-    let on_resolve_obj = unsafe { JsObject::from_raw(ctx, on_resolve) };
-    let on_reject_obj = unsafe { JsObject::from_raw(ctx, on_reject) };
+    let on_resolve_obj = unsafe { Object::from_raw(ctx, on_resolve) };
+    let on_reject_obj = unsafe { Object::from_raw(ctx, on_reject) };
     Ok((on_resolve_obj, on_reject_obj))
 }
 
-fn ensure_thenable(obj: &JsObject<'_>) -> Result<(), JsException> {
+fn ensure_thenable(obj: &Object<'_>) -> Result<(), Exception> {
     let then_val = obj.get("then")?;
     if !then_val.is_object() {
-        return Err(JsException::new(
+        return Err(Exception::new(
             "Value is not thenable (missing Promise.then).",
         ));
     }
     let then_obj = then_val.to_object()?;
     if !then_obj.is_function() {
-        return Err(JsException::new(
+        return Err(Exception::new(
             "Value is not thenable \
              (Promise.then not callable).",
         ));

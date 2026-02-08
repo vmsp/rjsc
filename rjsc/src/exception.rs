@@ -7,13 +7,13 @@ use crate::js_string_to_rust;
 
 /// A JavaScript execution error.
 #[derive(Debug)]
-pub struct JsException {
+pub struct Exception {
     message: String,
 }
 
-impl JsException {
+impl Exception {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        JsException { message: message.into() }
+        Exception { message: message.into() }
     }
 
     pub(crate) fn from_jsvalue(ctx: JSContextRef, val: JSValueRef) -> Self {
@@ -23,7 +23,7 @@ impl JsException {
             JSStringRelease(js_str);
             s
         };
-        JsException { message }
+        Exception { message }
     }
 
     pub fn message(&self) -> &str {
@@ -31,10 +31,10 @@ impl JsException {
     }
 }
 
-impl fmt::Display for JsException {
+impl fmt::Display for Exception {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "JsException: {}", self.message)
+        write!(f, "Exception: {}", self.message)
     }
 }
 
-impl std::error::Error for JsException {}
+impl std::error::Error for Exception {}

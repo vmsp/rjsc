@@ -4,9 +4,9 @@ use std::rc::Rc;
 
 use rjsc_sys::*;
 
-use crate::{js_string_from_rust, JsContext, JsValue};
+use crate::{js_string_from_rust, Context, Value};
 
-pub(crate) type RustCallback = dyn for<'a> Fn(&'a JsContext, &[JsValue<'a>]) -> Result<JsValue<'a>, String>
+pub(crate) type RustCallback = dyn for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     + 'static;
 
 pub(crate) type RawCb =
@@ -14,7 +14,7 @@ pub(crate) type RawCb =
 
 pub(crate) struct CallbackHolder<T: ?Sized> {
     pub(crate) cb: Box<T>,
-    pub(crate) runtime: Option<Rc<crate::runtime::JsRuntimeInner>>,
+    pub(crate) runtime: Option<Rc<crate::runtime::RuntimeInner>>,
 }
 
 pub(crate) unsafe extern "C" fn rust_callback_trampoline(
@@ -32,16 +32,16 @@ pub(crate) unsafe extern "C" fn rust_callback_trampoline(
     let holder = unsafe { &*(private as *const CallbackHolder<RustCallback>) };
     let cb = &*holder.cb;
 
-    let temp_ctx = std::mem::ManuallyDrop::new(JsContext {
+    let temp_ctx = std::mem::ManuallyDrop::new(Context {
         raw: ctx as JSGlobalContextRef,
         _not_send_sync: std::marker::PhantomData,
         _runtime: holder.runtime.clone(),
     });
 
-    let args: Vec<JsValue<'_>> = (0..argc)
+    let args: Vec<Value<'_>> = (0..argc)
         .map(|i| {
             let raw = unsafe { *argv.add(i) };
-            unsafe { JsValue::from_raw(&temp_ctx, raw) }
+            unsafe { Value::from_raw(&temp_ctx, raw) }
         })
         .collect();
 

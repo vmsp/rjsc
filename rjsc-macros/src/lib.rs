@@ -1,588 +1,266 @@
 use proc_macro::TokenStream;
-use proc_macro_crate::{crate_name, FoundCrate};
-use quote::quote;
-use syn::parse_macro_input;
-use syn::{
-    FnArg, Ident, ItemFn, Pat, PathArguments, ReturnType, Type, TypePath,
-    TypeReference,
-};
+use quote::{format_ident, quote};
+use syn::{parse_macro_input, FnArg, ItemFn, ReturnType, Type};
 
 #[proc_macro_attribute]
 pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
-    expand_function(input).into()
-}
+    let input_fn = parse_macro_input!(item as ItemFn);
 
-fn expand_function(func: ItemFn) -> proc_macro2::TokenStream {
-    let crate_path = match crate_name("rjsc") {
-        Ok(FoundCrate::Itself) => quote!(crate),
-        Ok(FoundCrate::Name(name)) => {
-            let ident = Ident::new(&name, proc_macro2::Span::call_site());
-            quote!(::#ident)
+    let fn_name = &input_fn.sig.ident;
+    let fn_vis = &input_fn.vis;
+    let fn_block = &input_fn.block;
+
+    // Create internal name for the actual function
+    let internal_name = format_ident!("__rjsc_{}", fn_name);
+    let wrapper_name = format_ident!("__rjsc_wrap_{}", fn_name);
+    let struct_name = format_ident!("__rjsc_fn_{}", fn_name);
+
+    // Build the original function signature for the internal implementation
+    let fn_sig = &input_fn.sig;
+    let fn_generics = &fn_sig.generics;
+    let fn_inputs = &fn_sig.inputs;
+    let fn_output = &fn_sig.output;
+
+    // Extract argument analysis
+    let mut arg_converters = Vec::new();
+    let mut arg_count = 0;
+
+    for (idx, arg) in fn_inputs.iter().enumerate() {
+        match arg {
+            FnArg::Receiver(_) => {
+                panic!("#[rjsc::function] cannot be used on methods")
+            }
+            FnArg::Typed(pat_type) => {
+                let pat = &pat_type.pat;
+                let ty = &pat_type.ty;
+
+                // Check if first arg is &Context
+                if idx == 0 && is_context_ref(ty) {
+                    arg_converters.push(ArgConverter {
+                        idx,
+                        converter: quote! { #pat },
+                        is_ctx: true,
+                    });
+                } else {
+                    let converter = generate_arg_converter(
+                        idx,
+                        arg_count,
+                        ty,
+                        quote! { #pat },
+                    );
+                    arg_converters.push(ArgConverter {
+                        idx,
+                        converter,
+                        is_ctx: false,
+                    });
+                    arg_count += 1;
+                }
+            }
         }
-        Err(_) => quote!(::rjsc),
+    }
+
+    // Determine return type handling
+    let return_handling = match fn_output {
+        ReturnType::Default => ReturnHandling::Unit,
+        ReturnType::Type(_, ty) => analyze_return_type(ty),
     };
 
-    let sig = &func.sig;
-    let fn_name = &sig.ident;
-    let wrapper_name = Ident::new(&format!("{}_rjsc", fn_name), fn_name.span());
-    let register_name =
-        Ident::new(&format!("register_{}", fn_name), fn_name.span());
+    // Generate argument extraction code
+    let arg_extraction: Vec<_> = arg_converters
+        .iter()
+        .filter(|c| !c.is_ctx)
+        .map(|c| &c.converter)
+        .collect();
 
-    let mut arg_idents = Vec::new();
-    let mut arg_types = Vec::new();
-    for arg in sig.inputs.iter() {
-        if let FnArg::Typed(typed) = arg {
-            if let Pat::Ident(ident) = typed.pat.as_ref() {
-                arg_idents.push(ident.ident.clone());
-                arg_types.push(typed.ty.as_ref().clone());
+    // Generate the internal function call arguments
+    let call_args: Vec<_> = arg_converters
+        .iter()
+        .map(|c| {
+            if c.is_ctx {
+                quote! { ctx }
             } else {
-                return quote! {
-                    compile_error!("rjsc::function requires named args");
-                    #func
-                };
+                let idx = c.idx;
+                let arg_name = format_ident!("arg{}", idx);
+                quote! { #arg_name }
+            }
+        })
+        .collect();
+
+    // Generate return conversion
+    let return_conv = match &return_handling {
+        ReturnHandling::Unit => quote! {
+            #internal_name(#(#call_args),*);
+            ::std::result::Result::Ok(::rjsc::Value::undefined(ctx))
+        },
+        ReturnHandling::Direct(ty) => {
+            let conv = generate_return_converter(ty);
+            quote! {
+                let result = #internal_name(#(#call_args),*);
+                ::std::result::Result::Ok(#conv)
             }
         }
-    }
-
-    let mut arg_offset = 0usize;
-    let mut prep = Vec::new();
-
-    if let Some(first_ty) = arg_types.first() {
-        if is_ctx_ref(first_ty) {
-            arg_offset = 1;
-        }
-    }
-
-    if sig.asyncness.is_some() {
-        prep.push(quote! {
-            let ctx_owned = #crate_path::JsContextOwned::from_ctx(ctx);
-        });
-    }
-
-    for (idx, (ident, ty)) in
-        arg_idents.iter().zip(arg_types.iter()).enumerate()
-    {
-        if idx == 0 && arg_offset == 1 {
-            continue;
-        }
-        let arg_index = idx - arg_offset;
-        let arg_get = quote! {
-            let #ident = args.get(#arg_index).ok_or_else(|| {
-                format!("missing argument {}", #arg_index)
-            })?;
-        };
-
-        let convert = if is_string(ty) {
-            quote! { let #ident = #ident.to_string_lossy(); }
-        } else if is_bool(ty) {
-            quote! { let #ident = #ident.to_boolean(); }
-        } else if is_f64(ty) {
-            quote! { let #ident = #ident.to_number(); }
-        } else if is_js_object(ty) {
-            if sig.asyncness.is_some() {
-                quote! {
-                    let #ident = #crate_path::JsValueOwned::from_ref(
-                        ctx,
-                        #ident,
-                    );
-                    let #ident = #ident.into_value(ctx);
-                    let #ident = #ident
-                        .to_object()
-                        .map_err(|e| e.message().to_string())?;
-                    let #ident = #crate_path::JsObjectOwned::from_object(
-                        ctx,
-                        #ident,
-                    );
-                }
-            } else {
-                quote! {
-                    let #ident = #crate_path::JsValueOwned::from_ref(
-                        ctx,
-                        #ident,
-                    );
-                    let #ident = #ident.into_value(ctx);
-                    let #ident = #ident
-                        .to_object()
-                        .map_err(|e| e.message().to_string())?;
+        ReturnHandling::Result(ok_ty) => {
+            let conv = generate_return_converter(ok_ty);
+            quote! {
+                match #internal_name(#(#call_args),*) {
+                    ::std::result::Result::Ok(result) => ::std::result::Result::Ok(#conv),
+                    ::std::result::Result::Err(e) => ::std::result::Result::Err(e.to_string()),
                 }
             }
-        } else if is_jsvalue(ty) {
-            if sig.asyncness.is_some() {
-                quote! {
-                    let #ident = #crate_path::JsValueOwned::from_ref(
-                        ctx,
-                        #ident,
-                    );
+        }
+    };
+
+    // Generate the output
+    let output = quote! {
+        // The original function, renamed
+        #[doc(hidden)]
+        #fn_vis fn #internal_name #fn_generics (#fn_inputs) #fn_output {
+            #fn_block
+        }
+
+        // Wrapper function
+        #[doc(hidden)]
+        #fn_vis fn #wrapper_name<'ctx>(
+            ctx: &'ctx ::rjsc::Context,
+            args: &[::rjsc::Value<'ctx>],
+        ) -> ::std::result::Result<::rjsc::Value<'ctx>, String> {
+            #(#arg_extraction)*
+            #return_conv
+        }
+
+        // Marker struct for IntoJs implementation
+        #[doc(hidden)]
+        #fn_vis struct #struct_name;
+
+        // Implement IntoJs for the marker struct
+        impl<'ctx> ::rjsc::IntoJs<'ctx> for #struct_name {
+            fn into_js(self, ctx: &'ctx ::rjsc::Context) -> ::rjsc::Value<'ctx> {
+                ctx.create_function(#wrapper_name)
+            }
+        }
+
+        // Const instance with the original function name
+        #fn_vis const #fn_name: #struct_name = #struct_name;
+    };
+
+    output.into()
+}
+
+struct ArgConverter {
+    idx: usize,
+    converter: proc_macro2::TokenStream,
+    is_ctx: bool,
+}
+
+#[derive(Debug)]
+enum ReturnHandling {
+    Unit,
+    Direct(Type),
+    Result(Type),
+}
+
+fn is_context_ref(ty: &Type) -> bool {
+    if let Type::Reference(type_ref) = ty {
+        if type_ref.mutability.is_none() {
+            if let Type::Path(type_path) = &*type_ref.elem {
+                let path = &type_path.path;
+                if path.is_ident("Context") {
+                    return true;
                 }
-            } else {
-                return quote! {
-                    compile_error!(
-                        "rjsc::function does not support JsValue args"
-                    );
-                    #func
-                };
+                // Check for Context with any prefix
+                if let Some(last) = path.segments.last() {
+                    if last.ident == "Context" {
+                        return true;
+                    }
+                }
             }
-        } else {
-            return quote! {
-                compile_error!(
-                    "rjsc::function only supports String, bool, f64, \
-                     JsObject, or &JsContext"
-                );
-                #func
-            };
-        };
-
-        prep.push(arg_get);
-        prep.push(convert);
-    }
-
-    let mut call_args = Vec::new();
-    for (idx, (ident, ty)) in
-        arg_idents.iter().zip(arg_types.iter()).enumerate()
-    {
-        if idx == 0 && arg_offset == 1 {
-            if sig.asyncness.is_some() {
-                call_args.push(quote!(ctx_ref));
-            } else {
-                call_args.push(quote!(#ident));
-            }
-            continue;
-        }
-        if sig.asyncness.is_some() {
-            if is_jsvalue(ty) {
-                call_args.push(quote!(#ident.into_value(ctx_ref)));
-            } else if is_js_object(ty) {
-                call_args.push(quote!(#ident.into_object(ctx_ref)));
-            } else {
-                call_args.push(quote!(#ident));
-            }
-        } else {
-            call_args.push(quote!(#ident));
         }
     }
+    false
+}
 
-    let call_expr = quote! { #fn_name(#(#call_args),*) };
-    let ret_expr = build_return_expr(
-        &sig.output,
-        call_expr,
-        sig.asyncness.is_some(),
-        &crate_path,
-    );
+fn analyze_return_type(ty: &Type) -> ReturnHandling {
+    if let Type::Path(type_path) = ty {
+        if let Some(seg) = type_path.path.segments.last() {
+            if seg.ident == "Result" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                {
+                    if let Some(first_arg) = args.args.first() {
+                        if let syn::GenericArgument::Type(t) = first_arg {
+                            return ReturnHandling::Result(t.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ReturnHandling::Direct(ty.clone())
+}
 
-    let func_vis = &func.vis;
+fn generate_arg_converter(
+    _orig_idx: usize,
+    arg_idx: usize,
+    ty: &Type,
+    _pat: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let arg_name = format_ident!("arg{}", _orig_idx);
+    let idx_lit = syn::Index::from(arg_idx);
+    let convert_code = generate_type_conversion(ty, quote! { args[#idx_lit] });
 
     quote! {
-        #func
-
-        #func_vis fn #wrapper_name<'ctx>(
-            ctx: &'ctx #crate_path::JsContext,
-            args: &[#crate_path::JsValue<'ctx>],
-        ) -> Result<#crate_path::JsValue<'ctx>, String> {
-            #(#prep)*
-            #ret_expr
-        }
-
-        #func_vis fn #register_name(ctx: &#crate_path::JsContext) {
-            ctx.register_fn(stringify!(#fn_name), #wrapper_name);
-        }
+        let #arg_name = #convert_code;
     }
 }
 
-fn build_return_expr(
-    output: &ReturnType,
-    call_expr: proc_macro2::TokenStream,
-    is_async: bool,
-    crate_path: &proc_macro2::TokenStream,
+fn generate_type_conversion(
+    ty: &Type,
+    value_expr: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let convert = if is_async {
-        match output {
-            ReturnType::Default => quote! {
-                let __rjsc_convert_result =
-                    |_result: ()| -> #crate_path::TaskResult {
-                        #crate_path::TaskResult::Ok(
-                            #crate_path::TaskValue::Undefined
-                        )
-                    };
-            },
-            ReturnType::Type(_, ty) => {
-                if is_result_jsvalue(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<#crate_path::JsValue<'_>, String>|
-                                -> #crate_path::TaskResult {
-                                    match result {
-                                        Ok(val) => {
-                                            #crate_path::TaskResult::Value(
-                                                #crate_path::JsValueOwned
-                                                    ::from_value(
-                                                    ctx_ref,
-                                                    val,
-                                                )
-                                            )
-                                        }
-                                        Err(err) => {
-                                            #crate_path::TaskResult::Err(err)
-                                        }
-                                    }
-                                };
-                    }
-                } else if is_jsvalue(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: #crate_path::JsValue<'_>|
-                                -> #crate_path::TaskResult {
-                                    #crate_path::TaskResult::Value(
-                                        #crate_path::JsValueOwned::from_value(
-                                            ctx_ref,
-                                            result,
-                                        )
-                                    )
-                                };
-                    }
-                } else if is_result_jsobject(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<#crate_path::JsObject<'_>, String>|
-                                -> #crate_path::TaskResult {
-                                    match result {
-                                        Ok(val) => {
-                                            #crate_path::TaskResult::Value(
-                                                #crate_path::JsObjectOwned
-                                                    ::from_object(
-                                                    ctx_ref,
-                                                    val,
-                                                )
-                                                .into_value()
-                                            )
-                                        }
-                                        Err(err) => {
-                                            #crate_path::TaskResult::Err(err)
-                                        }
-                                    }
-                                };
-                    }
-                } else if is_js_object(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: #crate_path::JsObject<'_>|
-                                -> #crate_path::TaskResult {
-                                    #crate_path::TaskResult::Value(
-                                        #crate_path::JsObjectOwned::from_object(
-                                            ctx_ref,
-                                            result,
-                                        )
-                                        .into_value()
-                                    )
-                                };
-                    }
-                } else if is_result_unit(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<(), String>|
-                                -> #crate_path::TaskResult {
-                                    match result {
-                                        Ok(()) => #crate_path::TaskResult::Ok(
-                                            #crate_path::TaskValue::Undefined
-                                        ),
-                                        Err(err) => {
-                                            #crate_path::TaskResult::Err(err)
-                                        }
-                                    }
-                                };
-                    }
-                } else if is_result_string(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<String, String>|
-                                -> #crate_path::TaskResult {
-                                    match result {
-                                        Ok(val) => #crate_path::TaskResult::Ok(
-                                            #crate_path::TaskValue::String(val)
-                                        ),
-                                        Err(err) => {
-                                            #crate_path::TaskResult::Err(err)
-                                        }
-                                    }
-                                };
-                    }
-                } else if is_result_bool(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<bool, String>|
-                                -> #crate_path::TaskResult {
-                                    match result {
-                                        Ok(val) => #crate_path::TaskResult::Ok(
-                                            #crate_path::TaskValue::Bool(val)
-                                        ),
-                                        Err(err) => {
-                                            #crate_path::TaskResult::Err(err)
-                                        }
-                                    }
-                                };
-                    }
-                } else if is_result_f64(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<f64, String>|
-                                -> #crate_path::TaskResult {
-                                    match result {
-                                        Ok(val) => #crate_path::TaskResult::Ok(
-                                            #crate_path::TaskValue::F64(val)
-                                        ),
-                                        Err(err) => {
-                                            #crate_path::TaskResult::Err(err)
-                                        }
-                                    }
-                                };
-                    }
-                } else if is_string(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: String|
-                                -> #crate_path::TaskResult {
-                                    #crate_path::TaskResult::Ok(
-                                        #crate_path::TaskValue::String(result)
-                                    )
-                                };
-                    }
-                } else if is_bool(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: bool|
-                                -> #crate_path::TaskResult {
-                                    #crate_path::TaskResult::Ok(
-                                        #crate_path::TaskValue::Bool(result)
-                                    )
-                                };
-                    }
-                } else if is_f64(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: f64|
-                                -> #crate_path::TaskResult {
-                                    #crate_path::TaskResult::Ok(
-                                        #crate_path::TaskValue::F64(result)
-                                    )
-                                };
-                    }
-                } else if is_unit(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |_result: ()| -> #crate_path::TaskResult {
-                                #crate_path::TaskResult::Ok(
-                                    #crate_path::TaskValue::Undefined
-                                )
-                            };
-                    }
-                } else {
-                    return quote! {
-                        compile_error!(
-                            "async rjsc::function return type must be \
-                             (), JsValue, JsObject, String, bool, f64, \
-                             or Result<_, String>"
-                        );
-                    };
+    if let Type::Path(type_path) = ty {
+        if let Some(seg) = type_path.path.segments.last() {
+            let type_name = seg.ident.to_string();
+            return match type_name.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16"
+                | "u32" | "u64" | "usize" => {
+                    quote! { #value_expr.to_number() as #ty }
                 }
-            }
-        }
-    } else {
-        match output {
-            ReturnType::Default => quote! {
-                let __rjsc_convert_result =
-                    |_result: ()|
-                        -> Result<#crate_path::JsValue<'ctx>, String> {
-                        Ok(#crate_path::JsValue::undefined(ctx))
-                    };
-            },
-            ReturnType::Type(_, ty) => {
-                if is_result_jsvalue(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<#crate_path::JsValue<'ctx>, String>|
-                                -> Result<#crate_path::JsValue<'ctx>, String> {
-                                    result
-                                };
-                    }
-                } else if is_result_unit(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: Result<(), String>|
-                                -> Result<#crate_path::JsValue<'ctx>, String> {
-                                    result.map(|_| {
-                                        #crate_path::JsValue::undefined(ctx)
-                                    })
-                                };
-                    }
-                } else if is_jsvalue(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |result: #crate_path::JsValue<'ctx>|
-                                -> Result<#crate_path::JsValue<'ctx>, String> {
-                                    Ok(result)
-                                };
-                    }
-                } else if is_unit(ty) {
-                    quote! {
-                        let __rjsc_convert_result =
-                            |_result: ()|
-                                -> Result<#crate_path::JsValue<'ctx>, String> {
-                                    Ok(#crate_path::JsValue::undefined(ctx))
-                                };
-                    }
-                } else {
-                    return quote! {
-                        compile_error!(
-                            "rjsc::function return type must be JsValue, \
-                             Result<JsValue, String>, Result<(), String>, \
-                             or ()"
-                        );
-                    };
+                "f32" | "f64" => {
+                    quote! { #value_expr.to_number() }
                 }
-            }
-        }
-    };
-
-    if is_async {
-        quote! {
-            let (promise, resolver) = #crate_path::JsPromise::deferred(ctx)
-                .map_err(|e| e.message().to_string())?;
-            let resolver = resolver.to_owned();
-
-            let fut: std::pin::Pin<
-                Box<dyn std::future::Future<
-                    Output = #crate_path::TaskResult
-                > + '_>
-            > = Box::pin(async move {
-                let ctx_ref = &*ctx_owned;
-                #convert
-                __rjsc_convert_result(#call_expr.await)
-            });
-
-            let fut: std::pin::Pin<
-                Box<dyn std::future::Future<
-                    Output = #crate_path::TaskResult
-                > + 'static>
-            > = unsafe { std::mem::transmute(fut) };
-            let task = #crate_path::Task::new(fut, resolver);
-            ctx.__rjsc_enqueue_task(task);
-
-            Ok(promise.to_value())
-        }
-    } else {
-        quote! {
-            #convert
-            __rjsc_convert_result(#call_expr)
+                "bool" => {
+                    quote! { #value_expr.to_boolean() }
+                }
+                "String" => {
+                    quote! { #value_expr.to_string_lossy() }
+                }
+                _ => panic!("Unsupported argument type: {}", type_name),
+            };
         }
     }
+    panic!("Unsupported argument type")
 }
 
-fn is_ctx_ref(ty: &Type) -> bool {
-    matches!(ty, Type::Reference(TypeReference { elem, .. })
-        if is_jscontext(elem))
-}
-
-fn is_jscontext(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. })
-        if path.segments.last().is_some_and(|s| s.ident == "JsContext"))
-}
-
-fn is_js_object(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. })
-        if path.segments.last().is_some_and(|s| s.ident == "JsObject"))
-}
-
-fn is_jsvalue(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. })
-        if path.segments.last().is_some_and(|s| s.ident == "JsValue"))
-}
-
-fn is_string(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. })
-        if path.segments.last().is_some_and(|s| s.ident == "String"))
-}
-
-fn is_bool(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. })
-        if path.segments.last().is_some_and(|s| s.ident == "bool"))
-}
-
-fn is_f64(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. })
-        if path.segments.last().is_some_and(|s| s.ident == "f64"))
-}
-
-fn is_unit(ty: &Type) -> bool {
-    matches!(ty, Type::Tuple(t) if t.elems.is_empty())
-}
-
-fn is_result_jsvalue(ty: &Type) -> bool {
-    is_result_with(ty, "JsValue")
-}
-
-fn is_result_jsobject(ty: &Type) -> bool {
-    is_result_with(ty, "JsObject")
-}
-
-fn is_result_unit(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. }) if {
-        let seg = match path.segments.last() {
-            Some(seg) => seg,
-            None => return false,
-        };
-        if seg.ident != "Result" {
-            return false;
+fn generate_return_converter(ty: &Type) -> proc_macro2::TokenStream {
+    if let Type::Path(type_path) = ty {
+        if let Some(seg) = type_path.path.segments.last() {
+            let type_name = seg.ident.to_string();
+            return match type_name.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16"
+                | "u32" | "u64" | "usize" | "f32" | "f64" => {
+                    quote! { ::rjsc::Value::from_f64(ctx, result as f64) }
+                }
+                "bool" => {
+                    quote! { ::rjsc::Value::from_bool(ctx, result) }
+                }
+                "String" => {
+                    quote! { ::rjsc::Value::from_str(ctx, &result) }
+                }
+                "str" => {
+                    quote! { ::rjsc::Value::from_str(ctx, result) }
+                }
+                _ => panic!("Unsupported return type: {}", type_name),
+            };
         }
-        let PathArguments::AngleBracketed(args) = &seg.arguments else {
-            return false;
-        };
-        let mut iter = args.args.iter();
-        let Some(syn::GenericArgument::Type(first)) = iter.next() else {
-            return false;
-        };
-        let Some(syn::GenericArgument::Type(second)) = iter.next() else {
-            return false;
-        };
-        is_unit(first) && matches!(second, Type::Path(TypePath { path, .. })
-            if path.segments.last().is_some_and(|s| s.ident == "String"))
-    })
-}
-
-fn is_result_string(ty: &Type) -> bool {
-    is_result_with(ty, "String")
-}
-
-fn is_result_bool(ty: &Type) -> bool {
-    is_result_with(ty, "bool")
-}
-
-fn is_result_f64(ty: &Type) -> bool {
-    is_result_with(ty, "f64")
-}
-
-fn is_result_with(ty: &Type, name: &str) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. }) if {
-        let seg = match path.segments.last() {
-            Some(seg) => seg,
-            None => return false,
-        };
-        if seg.ident != "Result" {
-            return false;
-        }
-        let PathArguments::AngleBracketed(args) = &seg.arguments else {
-            return false;
-        };
-        let mut iter = args.args.iter();
-        let Some(syn::GenericArgument::Type(first)) = iter.next() else {
-            return false;
-        };
-        let Some(syn::GenericArgument::Type(second)) = iter.next() else {
-            return false;
-        };
-        let ok = matches!(first, Type::Path(TypePath { path, .. })
-            if path.segments.last().is_some_and(|s| s.ident == name));
-        let err = matches!(second, Type::Path(TypePath { path, .. })
-            if path.segments.last().is_some_and(|s| s.ident == "String"));
-        ok && err
-    })
+    }
+    panic!("Unsupported return type")
 }

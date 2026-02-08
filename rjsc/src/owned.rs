@@ -4,105 +4,105 @@ use std::rc::Rc;
 
 use rjsc_sys::*;
 
-use crate::{JsContext, JsObject, JsValue};
+use crate::{Context, Object, Value};
 
-pub struct JsContextOwned {
-    ctx: JsContext,
+pub struct ContextOwned {
+    ctx: Context,
 }
 
-impl JsContextOwned {
-    pub fn from_ctx(ctx: &JsContext) -> Self {
+impl ContextOwned {
+    pub fn from_ctx(ctx: &Context) -> Self {
         let raw = unsafe { JSGlobalContextRetain(ctx.raw()) };
         let runtime = ctx._runtime.clone();
-        let ctx = JsContext {
+        let ctx = Context {
             raw,
             _not_send_sync: std::marker::PhantomData,
             _runtime: runtime,
         };
-        JsContextOwned { ctx }
+        ContextOwned { ctx }
     }
 }
 
-impl Deref for JsContextOwned {
-    type Target = JsContext;
+impl Deref for ContextOwned {
+    type Target = Context;
 
     fn deref(&self) -> &Self::Target {
         &self.ctx
     }
 }
 
-pub struct JsValueOwned {
+pub struct ValueOwned {
     ctx: JSGlobalContextRef,
     /// Prevents the runtime `Rc` from dropping while this
     /// value is alive.
-    _runtime: Option<Rc<crate::runtime::JsRuntimeInner>>,
+    _runtime: Option<Rc<crate::runtime::RuntimeInner>>,
     raw: JSValueRef,
 }
 
-impl JsValueOwned {
-    pub fn from_ref(ctx: &JsContext, value: &JsValue<'_>) -> Self {
+impl ValueOwned {
+    pub fn from_ref(ctx: &Context, value: &Value<'_>) -> Self {
         unsafe { JSValueProtect(ctx.as_ctx(), value.raw) };
-        JsValueOwned {
+        ValueOwned {
             ctx: ctx.raw(),
             _runtime: ctx._runtime.clone(),
             raw: value.raw,
         }
     }
 
-    pub fn from_value(ctx: &JsContext, value: JsValue<'_>) -> Self {
+    pub fn from_value(ctx: &Context, value: Value<'_>) -> Self {
         let raw = value.raw;
         mem::forget(value);
-        JsValueOwned { ctx: ctx.raw(), _runtime: ctx._runtime.clone(), raw }
+        ValueOwned { ctx: ctx.raw(), _runtime: ctx._runtime.clone(), raw }
     }
 
-    /// Converts into a `JsValue` tied to the given context.
+    /// Converts into a `Value` tied to the given context.
     ///
     /// # Safety
     /// The caller must ensure `ctx` points to the same
     /// underlying JSC context and outlives the returned
     /// value.
-    pub fn into_value<'a>(self, ctx: &'a JsContext) -> JsValue<'a> {
-        let value = unsafe { JsValue::from_raw(ctx, self.raw) };
+    pub fn into_value<'a>(self, ctx: &'a Context) -> Value<'a> {
+        let value = unsafe { Value::from_raw(ctx, self.raw) };
         unsafe { JSValueUnprotect(self.ctx, self.raw) };
         mem::forget(self);
         value
     }
 }
 
-impl Drop for JsValueOwned {
+impl Drop for ValueOwned {
     fn drop(&mut self) {
         unsafe { JSValueUnprotect(self.ctx, self.raw) };
     }
 }
 
-pub struct JsObjectOwned {
+pub struct ObjectOwned {
     ctx: JSGlobalContextRef,
-    runtime: Option<Rc<crate::runtime::JsRuntimeInner>>,
+    runtime: Option<Rc<crate::runtime::RuntimeInner>>,
     raw: JSObjectRef,
 }
 
-impl JsObjectOwned {
-    pub fn from_object(ctx: &JsContext, value: JsObject<'_>) -> Self {
+impl ObjectOwned {
+    pub fn from_object(ctx: &Context, value: Object<'_>) -> Self {
         let raw = value.raw;
         mem::forget(value);
-        JsObjectOwned { ctx: ctx.raw(), runtime: ctx._runtime.clone(), raw }
+        ObjectOwned { ctx: ctx.raw(), runtime: ctx._runtime.clone(), raw }
     }
 
-    /// Converts into a `JsObject` tied to the given context.
+    /// Converts into an `Object` tied to the given context.
     ///
     /// # Safety
     /// The caller must ensure `ctx` points to the same
     /// underlying JSC context and outlives the returned
     /// object.
-    pub fn into_object<'a>(self, ctx: &'a JsContext) -> JsObject<'a> {
-        let obj = unsafe { JsObject::from_raw(ctx, self.raw) };
+    pub fn into_object<'a>(self, ctx: &'a Context) -> Object<'a> {
+        let obj = unsafe { Object::from_raw(ctx, self.raw) };
         unsafe { JSValueUnprotect(self.ctx, self.raw) };
         mem::forget(self);
         obj
     }
 
-    pub fn into_value(self) -> JsValueOwned {
-        let value = JsValueOwned {
+    pub fn into_value(self) -> ValueOwned {
+        let value = ValueOwned {
             ctx: self.ctx,
             _runtime: self.runtime.clone(),
             raw: self.raw as JSValueRef,
@@ -112,7 +112,7 @@ impl JsObjectOwned {
     }
 }
 
-impl Drop for JsObjectOwned {
+impl Drop for ObjectOwned {
     fn drop(&mut self) {
         unsafe { JSValueUnprotect(self.ctx, self.raw) };
     }

@@ -1,20 +1,23 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::task::{
+    Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker,
+};
 
-use crate::promise::JsPromiseResolverOwned;
-use crate::{JsContext, JsValue, JsValueOwned};
+use crate::owned::ValueOwned;
+use crate::promise::PromiseResolverOwned;
+use crate::{Context, Value};
 
 #[doc(hidden)]
 pub struct Task {
     future: Pin<Box<dyn Future<Output = TaskResult> + 'static>>,
-    resolver: JsPromiseResolverOwned,
+    resolver: PromiseResolverOwned,
 }
 
 #[doc(hidden)]
 pub enum TaskResult {
     Ok(TaskValue),
-    Value(JsValueOwned),
+    Value(ValueOwned),
     Err(String),
 }
 
@@ -29,22 +32,22 @@ pub enum TaskValue {
 impl Task {
     pub fn new(
         future: Pin<Box<dyn Future<Output = TaskResult> + 'static>>,
-        resolver: JsPromiseResolverOwned,
+        resolver: PromiseResolverOwned,
     ) -> Self {
         Task { future, resolver }
     }
 
-    pub(crate) fn poll(&mut self, ctx: &JsContext) -> Poll<()> {
+    pub(crate) fn poll(&mut self, ctx: &Context) -> Poll<()> {
         let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = TaskContext::from_waker(&waker);
 
         match self.future.as_mut().poll(&mut cx) {
             Poll::Ready(TaskResult::Ok(val)) => {
                 let value = match val {
-                    TaskValue::Undefined => JsValue::undefined(ctx),
-                    TaskValue::Bool(v) => JsValue::from_bool(ctx, v),
-                    TaskValue::F64(v) => JsValue::from_f64(ctx, v),
-                    TaskValue::String(v) => JsValue::from_str(ctx, &v),
+                    TaskValue::Undefined => Value::undefined(ctx),
+                    TaskValue::Bool(v) => Value::from_bool(ctx, v),
+                    TaskValue::F64(v) => Value::from_f64(ctx, v),
+                    TaskValue::String(v) => Value::from_str(ctx, &v),
                 };
                 if let Err(err) = self.resolver.resolve(ctx, &value) {
                     self.resolver

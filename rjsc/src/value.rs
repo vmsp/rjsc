@@ -2,62 +2,59 @@ use std::ptr;
 
 use rjsc_sys::*;
 
-use crate::{js_string_to_rust, JsContext, JsException, JsObject, JsPromise};
+use crate::{js_string_to_rust, Context, Exception, Object, Promise};
 
-/// A JavaScript value, tied to the lifetime of its [`JsContext`].
+/// A JavaScript value, tied to the lifetime of its [`Context`].
 ///
 /// The value is protected from garbage collection while this
 /// handle exists.
-pub struct JsValue<'ctx> {
+pub struct Value<'ctx> {
     pub(crate) raw: JSValueRef,
-    pub(crate) ctx: &'ctx JsContext,
+    pub(crate) ctx: &'ctx Context,
 }
 
-impl<'ctx> JsValue<'ctx> {
+impl<'ctx> Value<'ctx> {
     /// Wraps a raw `JSValueRef`, protecting it from GC.
     ///
     /// # Safety
     /// `raw` must be a valid `JSValueRef` belonging to the given
     /// context.
-    pub(crate) unsafe fn from_raw(
-        ctx: &'ctx JsContext,
-        raw: JSValueRef,
-    ) -> Self {
+    pub(crate) unsafe fn from_raw(ctx: &'ctx Context, raw: JSValueRef) -> Self {
         unsafe { JSValueProtect(ctx.as_ctx(), raw) };
-        JsValue { raw, ctx }
+        Value { raw, ctx }
     }
 
     /// Returns the context this value belongs to.
-    pub fn context(&self) -> &'ctx JsContext {
+    pub fn context(&self) -> &'ctx Context {
         self.ctx
     }
 
     /// Creates the JavaScript `undefined` value.
-    pub fn undefined(ctx: &'ctx JsContext) -> Self {
+    pub fn undefined(ctx: &'ctx Context) -> Self {
         let raw = unsafe { JSValueMakeUndefined(ctx.as_ctx()) };
         unsafe { Self::from_raw(ctx, raw) }
     }
 
     /// Creates the JavaScript `null` value.
-    pub fn null(ctx: &'ctx JsContext) -> Self {
+    pub fn null(ctx: &'ctx Context) -> Self {
         let raw = unsafe { JSValueMakeNull(ctx.as_ctx()) };
         unsafe { Self::from_raw(ctx, raw) }
     }
 
     /// Creates a JavaScript boolean value.
-    pub fn from_bool(ctx: &'ctx JsContext, value: bool) -> Self {
+    pub fn from_bool(ctx: &'ctx Context, value: bool) -> Self {
         let raw = unsafe { JSValueMakeBoolean(ctx.as_ctx(), value) };
         unsafe { Self::from_raw(ctx, raw) }
     }
 
     /// Creates a JavaScript number value.
-    pub fn from_f64(ctx: &'ctx JsContext, value: f64) -> Self {
+    pub fn from_f64(ctx: &'ctx Context, value: f64) -> Self {
         let raw = unsafe { JSValueMakeNumber(ctx.as_ctx(), value) };
         unsafe { Self::from_raw(ctx, raw) }
     }
 
     /// Creates a JavaScript string value.
-    pub fn from_str(ctx: &'ctx JsContext, value: &str) -> Self {
+    pub fn from_str(ctx: &'ctx Context, value: &str) -> Self {
         let raw = unsafe {
             let js_str = crate::js_string_from_rust(value);
             let val = JSValueMakeString(ctx.as_ctx(), js_str);
@@ -112,26 +109,23 @@ impl<'ctx> JsValue<'ctx> {
         unsafe { JSValueToNumber(self.ctx.as_ctx(), self.raw, ptr::null_mut()) }
     }
 
-    /// Converts this value to a [`JsObject`].
+    /// Converts this value to an [`Object`].
     ///
     /// Fails if the value is not an object (or convertible to one).
-    pub fn to_object(self) -> Result<JsObject<'ctx>, JsException> {
+    pub fn to_object(self) -> Result<Object<'ctx>, Exception> {
         let mut exception: JSValueRef = ptr::null();
         let obj = unsafe {
             JSValueToObject(self.ctx.as_ctx(), self.raw, &mut exception)
         };
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(
-                self.ctx.as_ctx(),
-                exception,
-            ));
+            return Err(Exception::from_jsvalue(self.ctx.as_ctx(), exception));
         }
-        Ok(unsafe { JsObject::from_raw(self.ctx, obj) })
+        Ok(unsafe { Object::from_raw(self.ctx, obj) })
     }
 
-    /// Converts to a [`JsPromise`].
-    pub fn to_promise(self) -> Result<JsPromise<'ctx>, JsException> {
-        JsPromise::from_value(self)
+    /// Converts to a [`Promise`].
+    pub fn to_promise(self) -> Result<Promise<'ctx>, Exception> {
+        Promise::from_value(self)
     }
 
     /// Converts to a Rust `String` using JavaScript's `String()`
@@ -153,21 +147,19 @@ impl<'ctx> JsValue<'ctx> {
     }
 }
 
-impl Drop for JsValue<'_> {
+impl Drop for Value<'_> {
     fn drop(&mut self) {
         unsafe { JSValueUnprotect(self.ctx.as_ctx(), self.raw) };
     }
 }
 
-impl std::fmt::Debug for JsValue<'_> {
+impl std::fmt::Debug for Value<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JsValue")
-            .field("repr", &self.to_string_lossy())
-            .finish()
+        f.debug_struct("Value").field("repr", &self.to_string_lossy()).finish()
     }
 }
 
-impl std::fmt::Display for JsValue<'_> {
+impl std::fmt::Display for Value<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_string_lossy())
     }

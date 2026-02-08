@@ -9,21 +9,20 @@ use crate::callbacks::{
     rust_callback_trampoline, CallbackHolder, RawCb, RustCallback,
 };
 use crate::js_string_from_rust;
-use crate::task::Task;
-use crate::{JsException, JsPromise, JsRuntime, JsValue};
+use crate::{Exception, Object, Promise, Runtime, Value};
 
 /// A JavaScript global execution context.
 ///
 /// This owns the underlying JSC global context and releases it on drop.
-pub struct JsContext {
+pub struct Context {
     pub(crate) raw: JSGlobalContextRef,
     pub(crate) _not_send_sync: std::marker::PhantomData<Rc<()>>,
-    pub(crate) _runtime: Option<Rc<crate::runtime::JsRuntimeInner>>,
+    pub(crate) _runtime: Option<Rc<crate::runtime::RuntimeInner>>,
 }
 
-impl JsContext {
+impl Context {
     /// Creates a new JavaScript execution context in the given runtime.
-    pub fn new_in(runtime: &JsRuntime) -> Self {
+    pub fn new_in(runtime: &Runtime) -> Self {
         let raw = unsafe {
             JSGlobalContextCreateInGroup(runtime.raw(), ptr::null_mut())
         };
@@ -35,7 +34,7 @@ impl JsContext {
     }
 
     /// Evaluates a string of JavaScript and returns the result.
-    pub fn eval(&self, code: &str) -> Result<JsValue<'_>, JsException> {
+    pub fn eval(&self, code: &str) -> Result<Value<'_>, Exception> {
         let script = unsafe { js_string_from_rust(code) };
         let mut exception: JSValueRef = ptr::null();
 
@@ -52,38 +51,35 @@ impl JsContext {
         unsafe { JSStringRelease(script) };
 
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(self.raw, exception));
+            return Err(Exception::from_jsvalue(self.raw, exception));
         }
 
-        Ok(unsafe { JsValue::from_raw(self, result) })
+        Ok(unsafe { Value::from_raw(self, result) })
     }
 
     /// Evaluates JavaScript code and, if it returns a promise,
     /// resolves it.
     ///
     /// This is a blocking helper that uses the default microtask
-    /// drain driver. Use [`JsPromise::into_future`] for
+    /// drain driver. Use [`Promise::into_future`] for
     /// non-blocking integration.
-    pub fn eval_async(&self, code: &str) -> Result<JsValue<'_>, JsException> {
+    pub fn eval_async(&self, code: &str) -> Result<Value<'_>, Exception> {
         let value = self.eval(code)?;
         if !value.is_object() {
             return Ok(value);
         }
 
         let raw = value.raw;
-        match JsPromise::from_value(value) {
+        match Promise::from_value(value) {
             Ok(promise) => promise.await_blocking(),
-            Err(_) => Ok(unsafe { JsValue::from_raw(self, raw) }),
+            Err(_) => Ok(unsafe { Value::from_raw(self, raw) }),
         }
     }
 
     /// Evaluates JavaScript code expected to return a promise.
-    pub fn eval_promise(
-        &self,
-        code: &str,
-    ) -> Result<JsPromise<'_>, JsException> {
+    pub fn eval_promise(&self, code: &str) -> Result<Promise<'_>, Exception> {
         let value = self.eval(code)?;
-        JsPromise::from_value(value)
+        Promise::from_value(value)
     }
 
     pub fn poll_async(&self) -> usize {
@@ -93,18 +89,21 @@ impl JsContext {
         }
     }
 
-    /// Registers a Rust function as a global JavaScript function.
+    /// Returns the global object.
+    pub fn global(&self) -> Object<'_> {
+        let raw = unsafe { JSContextGetGlobalObject(self.raw) };
+        unsafe { Object::from_raw(self, raw) }
+    }
+
+    /// Creates a JavaScript function from a Rust closure.
     ///
-    /// The callback receives a slice of [`JsValue`] arguments and returns
-    /// either a [`JsValue`] result or an error string.
+    /// The callback receives a slice of [`Value`] arguments and returns
+    /// either a [`Value`] result or an error string.
     ///
-    /// The closure must live at least as long as this `JsContext`.
-    pub fn register_fn<F>(&self, name: &str, f: F)
+    /// The closure must live at least as long as this `Context`.
+    pub fn create_function<F>(&self, f: F) -> Value<'_>
     where
-        F: for<'a> Fn(
-                &'a JsContext,
-                &[JsValue<'a>],
-            ) -> Result<JsValue<'a>, String>
+        F: for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
             + 'static,
     {
         let cb: Box<RustCallback> = Box::new(f);
@@ -121,20 +120,7 @@ impl JsContext {
 
         let func_obj = unsafe { JSObjectMake(self.raw, class, private) };
         unsafe { JSClassRelease(class) };
-
-        unsafe {
-            let global = JSContextGetGlobalObject(self.raw);
-            let js_name = js_string_from_rust(name);
-            JSObjectSetProperty(
-                self.raw,
-                global,
-                js_name,
-                func_obj,
-                0,
-                ptr::null_mut(),
-            );
-            JSStringRelease(js_name);
-        }
+        unsafe { Value::from_raw(self, func_obj) }
     }
 
     /// Creates a raw JS function object from a Rust closure.
@@ -162,13 +148,6 @@ impl JsContext {
         obj
     }
 
-    #[doc(hidden)]
-    pub fn __rjsc_enqueue_task(&self, task: Task) {
-        if let Some(runtime) = &self._runtime {
-            runtime.push_task(task);
-        }
-    }
-
     /// Returns the raw `JSGlobalContextRef`.
     pub fn raw(&self) -> JSGlobalContextRef {
         self.raw
@@ -180,7 +159,7 @@ impl JsContext {
     }
 }
 
-impl Drop for JsContext {
+impl Drop for Context {
     fn drop(&mut self) {
         unsafe { JSGlobalContextRelease(self.raw) };
     }

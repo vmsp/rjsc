@@ -4,34 +4,34 @@ use std::ptr;
 use rjsc_sys::*;
 
 use crate::{
-    js_string_from_rust, js_string_to_rust, JsContext, JsException, JsValue,
+    js_string_from_rust, js_string_to_rust, Context, Exception, IntoJs, Value,
 };
 
-/// A JavaScript object, tied to the lifetime of its [`JsContext`].
+/// A JavaScript object, tied to the lifetime of its [`Context`].
 ///
 /// This wraps a `JSObjectRef` and provides property access, array
 /// indexing, and method calls.
-pub struct JsObject<'ctx> {
+pub struct Object<'ctx> {
     pub(crate) raw: JSObjectRef,
-    pub(crate) ctx: &'ctx JsContext,
+    pub(crate) ctx: &'ctx Context,
 }
 
-impl<'ctx> JsObject<'ctx> {
+impl<'ctx> Object<'ctx> {
     /// Wraps a raw `JSObjectRef`, protecting it from GC.
     ///
     /// # Safety
     /// `raw` must be a valid `JSObjectRef` belonging to the given
     /// context.
     pub(crate) unsafe fn from_raw(
-        ctx: &'ctx JsContext,
+        ctx: &'ctx Context,
         raw: JSObjectRef,
     ) -> Self {
         unsafe { JSValueProtect(ctx.as_ctx(), raw) };
-        JsObject { raw, ctx }
+        Object { raw, ctx }
     }
 
     /// Creates a new, empty JavaScript object.
-    pub fn new(ctx: &'ctx JsContext) -> Self {
+    pub fn new(ctx: &'ctx Context) -> Self {
         let raw = unsafe {
             JSObjectMake(ctx.as_ctx(), ptr::null_mut(), ptr::null_mut())
         };
@@ -39,7 +39,7 @@ impl<'ctx> JsObject<'ctx> {
     }
 
     /// Returns the context this object belongs to.
-    pub fn context(&self) -> &'ctx JsContext {
+    pub fn context(&self) -> &'ctx Context {
         self.ctx
     }
 
@@ -54,11 +54,11 @@ impl<'ctx> JsObject<'ctx> {
         }
     }
 
-    /// Gets a property by name, returning it as a [`JsValue`].
+    /// Gets a property by name, returning it as a [`Value`].
     ///
     /// Returns the `undefined` value if the property doesn't
     /// exist.
-    pub fn get(&self, key: &str) -> Result<JsValue<'ctx>, JsException> {
+    pub fn get(&self, key: &str) -> Result<Value<'ctx>, Exception> {
         let mut exception: JSValueRef = ptr::null();
         let val = unsafe {
             let js_key = js_string_from_rust(key);
@@ -72,20 +72,18 @@ impl<'ctx> JsObject<'ctx> {
             v
         };
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(
-                self.ctx.as_ctx(),
-                exception,
-            ));
+            return Err(Exception::from_jsvalue(self.ctx.as_ctx(), exception));
         }
-        Ok(unsafe { JsValue::from_raw(self.ctx, val) })
+        Ok(unsafe { Value::from_raw(self.ctx, val) })
     }
 
     /// Sets a property by name.
     pub fn set(
         &self,
         key: &str,
-        value: &JsValue<'ctx>,
-    ) -> Result<(), JsException> {
+        value: impl IntoJs<'ctx>,
+    ) -> Result<(), Exception> {
+        let value = value.into_js(self.ctx);
         let mut exception: JSValueRef = ptr::null();
         unsafe {
             let js_key = js_string_from_rust(key);
@@ -100,17 +98,14 @@ impl<'ctx> JsObject<'ctx> {
             JSStringRelease(js_key);
         }
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(
-                self.ctx.as_ctx(),
-                exception,
-            ));
+            return Err(Exception::from_jsvalue(self.ctx.as_ctx(), exception));
         }
         Ok(())
     }
 
     /// Deletes a property by name. Returns `true` if the property
     /// was deleted.
-    pub fn delete(&self, key: &str) -> Result<bool, JsException> {
+    pub fn delete(&self, key: &str) -> Result<bool, Exception> {
         let mut exception: JSValueRef = ptr::null();
         let result = unsafe {
             let js_key = js_string_from_rust(key);
@@ -124,16 +119,13 @@ impl<'ctx> JsObject<'ctx> {
             r
         };
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(
-                self.ctx.as_ctx(),
-                exception,
-            ));
+            return Err(Exception::from_jsvalue(self.ctx.as_ctx(), exception));
         }
         Ok(result)
     }
 
     /// Gets an element by numeric index (e.g. for arrays).
-    pub fn get_index(&self, index: u32) -> Result<JsValue<'ctx>, JsException> {
+    pub fn get_index(&self, index: u32) -> Result<Value<'ctx>, Exception> {
         let mut exception: JSValueRef = ptr::null();
         let val = unsafe {
             JSObjectGetPropertyAtIndex(
@@ -144,20 +136,17 @@ impl<'ctx> JsObject<'ctx> {
             )
         };
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(
-                self.ctx.as_ctx(),
-                exception,
-            ));
+            return Err(Exception::from_jsvalue(self.ctx.as_ctx(), exception));
         }
-        Ok(unsafe { JsValue::from_raw(self.ctx, val) })
+        Ok(unsafe { Value::from_raw(self.ctx, val) })
     }
 
     /// Sets an element by numeric index.
     pub fn set_index(
         &self,
         index: u32,
-        value: &JsValue<'ctx>,
-    ) -> Result<(), JsException> {
+        value: &Value<'ctx>,
+    ) -> Result<(), Exception> {
         let mut exception: JSValueRef = ptr::null();
         unsafe {
             JSObjectSetPropertyAtIndex(
@@ -169,10 +158,7 @@ impl<'ctx> JsObject<'ctx> {
             );
         }
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(
-                self.ctx.as_ctx(),
-                exception,
-            ));
+            return Err(Exception::from_jsvalue(self.ctx.as_ctx(), exception));
         }
         Ok(())
     }
@@ -203,9 +189,9 @@ impl<'ctx> JsObject<'ctx> {
     /// to use the global object.
     pub fn call(
         &self,
-        this_obj: Option<&JsObject<'ctx>>,
-        args: &[&JsValue<'ctx>],
-    ) -> Result<JsValue<'ctx>, JsException> {
+        this_obj: Option<&Object<'ctx>>,
+        args: &[&Value<'ctx>],
+    ) -> Result<Value<'ctx>, Exception> {
         let mut exception: JSValueRef = ptr::null();
         let raw_args: Vec<JSValueRef> = args.iter().map(|a| a.raw).collect();
         let this_raw = this_obj.map_or(ptr::null_mut(), |o| o.raw);
@@ -224,20 +210,17 @@ impl<'ctx> JsObject<'ctx> {
             )
         };
         if !exception.is_null() {
-            return Err(JsException::from_jsvalue(
-                self.ctx.as_ctx(),
-                exception,
-            ));
+            return Err(Exception::from_jsvalue(self.ctx.as_ctx(), exception));
         }
-        Ok(unsafe { JsValue::from_raw(self.ctx, result) })
+        Ok(unsafe { Value::from_raw(self.ctx, result) })
     }
 
     /// Gets a property and calls it as a method on this object.
     pub fn call_method(
         &self,
         method: &str,
-        args: &[&JsValue<'ctx>],
-    ) -> Result<JsValue<'ctx>, JsException> {
+        args: &[&Value<'ctx>],
+    ) -> Result<Value<'ctx>, Exception> {
         let func_val = self.get(method)?;
         let func_obj = func_val.to_object()?;
         func_obj.call(Some(self), args)
@@ -248,21 +231,21 @@ impl<'ctx> JsObject<'ctx> {
         self.raw
     }
 
-    /// Converts this object back to a [`JsValue`].
-    pub fn to_value(&self) -> JsValue<'ctx> {
-        unsafe { JsValue::from_raw(self.ctx, self.raw) }
+    /// Converts this object back to a [`Value`].
+    pub fn to_value(&self) -> Value<'ctx> {
+        unsafe { Value::from_raw(self.ctx, self.raw) }
     }
 }
 
-impl Drop for JsObject<'_> {
+impl Drop for Object<'_> {
     fn drop(&mut self) {
         unsafe { JSValueUnprotect(self.ctx.as_ctx(), self.raw) };
     }
 }
 
-impl Debug for JsObject<'_> {
+impl Debug for Object<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JsObject")
+        f.debug_struct("Object")
             .field("properties", &self.property_names())
             .finish()
     }
