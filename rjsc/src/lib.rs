@@ -1,6 +1,7 @@
 mod callbacks;
 mod context;
 mod exception;
+mod function;
 mod into_js;
 mod object;
 mod owned;
@@ -16,6 +17,7 @@ mod tests;
 
 pub use context::Context;
 pub use exception::Exception;
+pub use function::Function;
 pub use into_js::IntoJs;
 pub use object::Object;
 pub use promise::{Promise, PromiseFuture, PromiseResolver};

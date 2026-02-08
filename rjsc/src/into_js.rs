@@ -1,4 +1,4 @@
-use crate::{Context, Value};
+use crate::{Context, Function, Value};
 
 /// Trait for converting Rust types into JavaScript values.
 pub trait IntoJs<'ctx> {
@@ -12,7 +12,7 @@ where
         + 'static,
 {
     fn into_js(self, ctx: &'ctx Context) -> Value<'ctx> {
-        ctx.create_function(self)
+        Function::new(ctx, self)
     }
 }
 

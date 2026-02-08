@@ -125,7 +125,7 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         // Implement IntoJs for the marker struct
         impl<'ctx> ::rjsc::IntoJs<'ctx> for #struct_name {
             fn into_js(self, ctx: &'ctx ::rjsc::Context) -> ::rjsc::Value<'ctx> {
-                ctx.create_function(#wrapper_name)
+                ::rjsc::Function::new(ctx, #wrapper_name)
             }
         }
 

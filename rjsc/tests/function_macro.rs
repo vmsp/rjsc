@@ -1,9 +1,8 @@
 use rjsc::{function, Context, Runtime};
 
-fn test_ctx() -> (Runtime, Context) {
+fn test_ctx() -> Context {
     let runtime = Runtime::default();
-    let ctx = runtime.new_context();
-    (runtime, ctx)
+    Context::new(&runtime)
 }
 
 #[test]
@@ -13,7 +12,7 @@ fn test_macro_basic() {
         a + b
     }
 
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("add", add).unwrap();
 
     let result = ctx.eval("add(3, 4)").unwrap();
@@ -27,7 +26,7 @@ fn test_macro_with_context() {
         format!("Hello, {name}!")
     }
 
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("greet", greet).unwrap();
 
     let result = ctx.eval("greet('World')").unwrap();
@@ -45,7 +44,7 @@ fn test_macro_with_result() {
         }
     }
 
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("divide", divide).unwrap();
 
     let result = ctx.eval("divide(10, 2)").unwrap();
@@ -62,7 +61,7 @@ fn test_macro_bool() {
         n % 2 == 0
     }
 
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("is_even", is_even).unwrap();
 
     assert!(ctx.eval("is_even(4)").unwrap().to_boolean());
@@ -76,7 +75,7 @@ fn test_macro_no_args() {
         42
     }
 
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("get_answer", get_answer).unwrap();
 
     let result = ctx.eval("get_answer()").unwrap();
@@ -90,7 +89,7 @@ fn test_macro_f64() {
         a * b + 0.5
     }
 
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("calculate", calculate).unwrap();
 
     let result = ctx.eval("calculate(2.0, 3.0)").unwrap();
@@ -105,11 +104,12 @@ fn test_macro_async_basic() {
         a + b
     }
 
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("async_add", async_add).unwrap();
 
     // Call the async function - it returns a Promise
     let promise = ctx.eval_promise("async_add(3, 4)").unwrap();
+    let rt = ctx.runtime().unwrap();
     let result = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(result.to_number(), 7.0);
 }
@@ -121,10 +121,11 @@ fn test_macro_async_string() {
         format!("Hello, {name}!")
     }
 
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     ctx.global().set("async_greet", async_greet).unwrap();
 
     let promise = ctx.eval_promise("async_greet('World')").unwrap();
+    let rt = ctx.runtime().unwrap();
     let result = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(result.to_string_lossy(), "Hello, World!");
 }

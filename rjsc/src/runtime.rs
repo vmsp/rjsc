@@ -21,8 +21,7 @@ pub struct Runtime {
 
 impl Runtime {
     /// Creates a Runtime from an existing RuntimeInner.
-    #[doc(hidden)]
-    pub fn from_inner(inner: Rc<RuntimeInner>) -> Self {
+    pub(crate) fn from_inner(inner: Rc<RuntimeInner>) -> Self {
         Self { inner }
     }
 
@@ -52,11 +51,6 @@ impl Runtime {
 
     pub(crate) fn raw(&self) -> JSContextGroupRef {
         self.inner.raw
-    }
-
-    /// Creates a new context inside this runtime.
-    pub fn new_context(&self) -> crate::Context {
-        crate::Context::new_in(self)
     }
 
     pub(crate) fn inner_clone(&self) -> Rc<RuntimeInner> {
@@ -188,13 +182,6 @@ impl RuntimeInner {
 
         *pending = remaining;
         completed
-    }
-
-    pub(crate) fn with_reactor<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&dyn Reactor) -> R,
-    {
-        f(&*self.reactor)
     }
 }
 

@@ -1,34 +1,32 @@
 use crate::*;
-use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 
 fn test_runtime() -> Runtime {
     Runtime::default()
 }
 
-fn test_ctx() -> (Runtime, Context) {
+fn test_ctx() -> Context {
     let runtime = test_runtime();
-    let ctx = runtime.new_context();
-    (runtime, ctx)
+    Context::new(&runtime)
 }
 
 #[test]
 fn eval_arithmetic() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = ctx.eval("1 + 2").unwrap();
     assert_eq!(val.to_number(), 3.0);
 }
 
 #[test]
 fn eval_string() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = ctx.eval("'hello' + ' world'").unwrap();
     assert_eq!(val.to_string_lossy(), "hello world");
 }
 
 #[test]
 fn eval_boolean() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = ctx.eval("true").unwrap();
     assert!(val.to_boolean());
 
@@ -38,7 +36,7 @@ fn eval_boolean() {
 
 #[test]
 fn eval_undefined_and_null() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
 
     let val = ctx.eval("undefined").unwrap();
     assert!(val.is_undefined());
@@ -49,83 +47,89 @@ fn eval_undefined_and_null() {
 
 #[test]
 fn eval_syntax_error() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let err = ctx.eval("let x = ").unwrap_err();
     assert!(err.message().contains("SyntaxError"), "got: {}", err.message());
 }
 
 #[test]
 fn eval_runtime_error() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let err = ctx.eval("nonexistent()").unwrap_err();
     assert!(err.message().contains("ReferenceError"), "got: {}", err.message());
 }
 
 #[test]
 fn eval_promise_resolved() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let promise = ctx.eval_promise("Promise.resolve(42)").unwrap();
+    let rt = ctx.runtime().unwrap();
     let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 42.0);
 }
 
 #[test]
 fn eval_promise_async_function() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let promise =
         ctx.eval_promise("(async () => { return 'async works'; })()").unwrap();
+    let rt = ctx.runtime().unwrap();
     let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_string_lossy(), "async works");
 }
 
 #[test]
 fn eval_promise_rejected() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let promise = ctx.eval_promise("Promise.reject('boom')").unwrap();
+    let rt = ctx.runtime().unwrap();
     let err = rt.block_on(&ctx, promise.into_future()).unwrap_err();
     assert_eq!(err.message(), "boom");
 }
 
 #[test]
 fn eval_promise_chain() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let promise = ctx
         .eval_promise(concat!(
             "Promise.resolve(10).then(x => x * 2).",
             "then(x => x + 1)"
         ))
         .unwrap();
+    let rt = ctx.runtime().unwrap();
     let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 21.0);
 }
 
 #[test]
 fn eval_promise_non_promise() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = ctx.eval("42").unwrap();
     assert_eq!(val.to_number(), 42.0);
 }
 
 #[test]
 fn eval_promise_returns_promise() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let promise = ctx.eval_promise("Promise.resolve(7)").unwrap();
+    let rt = ctx.runtime().unwrap();
     let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 7.0);
 }
 
 #[test]
 fn value_to_promise() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = ctx.eval("Promise.resolve(9)").unwrap();
     let promise = val.to_promise().unwrap();
+    let rt = ctx.runtime().unwrap();
     let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 9.0);
 }
 
 #[test]
 fn promise_deferred_resolve() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let (promise, resolver) = Promise::deferred(&ctx).unwrap();
     let mut fut = Box::pin(promise.into_future());
 
@@ -139,13 +143,14 @@ fn promise_deferred_resolve() {
     resolver.resolve(&value).unwrap();
 
     // Now it should complete
+    let rt = ctx.runtime().unwrap();
     let val = rt.block_on(&ctx, fut).unwrap();
     assert_eq!(val.to_string_lossy(), "done");
 }
 
 #[test]
 fn promise_deferred_reject() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let (promise, resolver) = Promise::deferred(&ctx).unwrap();
     let mut fut = Box::pin(promise.into_future());
 
@@ -158,21 +163,23 @@ fn promise_deferred_reject() {
     resolver.reject_str("nope").unwrap();
 
     // Now it should fail
+    let rt = ctx.runtime().unwrap();
     let err = rt.block_on(&ctx, fut).unwrap_err();
     assert_eq!(err.message(), "nope");
 }
 
 #[test]
 fn promise_into_future() {
-    let (rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let promise = ctx.eval_promise("Promise.resolve(123)").unwrap();
+    let rt = ctx.runtime().unwrap();
     let val = rt.block_on(&ctx, promise.into_future()).unwrap();
     assert_eq!(val.to_number(), 123.0);
 }
 
 #[test]
 fn value_undefined() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = Value::undefined(&ctx);
     assert!(val.is_undefined());
     assert!(!val.is_null());
@@ -181,7 +188,7 @@ fn value_undefined() {
 
 #[test]
 fn value_null() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = Value::null(&ctx);
     assert!(val.is_null());
     assert!(!val.is_undefined());
@@ -190,7 +197,7 @@ fn value_null() {
 
 #[test]
 fn value_from_bool() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let t = Value::from_bool(&ctx, true);
     assert!(t.is_boolean());
     assert!(t.to_boolean());
@@ -202,7 +209,7 @@ fn value_from_bool() {
 
 #[test]
 fn value_from_f64() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = Value::from_f64(&ctx, 3.14);
     assert!(val.is_number());
     assert!((val.to_number() - 3.14).abs() < f64::EPSILON);
@@ -210,7 +217,7 @@ fn value_from_f64() {
 
 #[test]
 fn value_from_str() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = Value::from_str(&ctx, "hello from rust");
     assert!(val.is_string());
     assert_eq!(val.to_string_lossy(), "hello from rust");
@@ -218,7 +225,7 @@ fn value_from_str() {
 
 #[test]
 fn object_new_and_properties() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let obj = Object::new(&ctx);
 
     assert!(!obj.has("foo"));
@@ -236,7 +243,7 @@ fn object_new_and_properties() {
 
 #[test]
 fn object_delete_property() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let obj = Object::new(&ctx);
     let val = Value::from_str(&ctx, "bar");
     obj.set("x", &val).unwrap();
@@ -249,7 +256,7 @@ fn object_delete_property() {
 
 #[test]
 fn object_index_access() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let arr = ctx.eval("[10, 20, 30]").unwrap();
     let arr_obj = arr.to_object().unwrap();
 
@@ -267,7 +274,7 @@ fn object_index_access() {
 
 #[test]
 fn object_from_eval() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = ctx.eval("({a: 1, b: 'two'})").unwrap();
     let obj = val.to_object().unwrap();
 
@@ -280,7 +287,7 @@ fn object_from_eval() {
 
 #[test]
 fn object_call_function() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let func_val = ctx.eval("(function(x) { return x * 2; })").unwrap();
     let func = func_val.to_object().unwrap();
 
@@ -293,7 +300,7 @@ fn object_call_function() {
 
 #[test]
 fn object_call_method() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let val = ctx
         .eval(concat!("({value: 10, double() ", "{ return this.value * 2; }})"))
         .unwrap();
@@ -305,7 +312,7 @@ fn object_call_method() {
 
 #[test]
 fn global_set_function_basic() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     fn make_add(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -322,7 +329,7 @@ fn global_set_function_basic() {
 
 #[test]
 fn global_set_function_returns_string() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     fn make_greet(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -338,7 +345,7 @@ fn global_set_function_returns_string() {
 
 #[test]
 fn global_set_function_error() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     fn make_fail(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -355,7 +362,7 @@ fn global_set_function_error() {
 
 #[test]
 fn global_set_function_no_args() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     fn make_forty_two(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -368,7 +375,7 @@ fn global_set_function_no_args() {
 
 #[test]
 fn global_set_function_called_from_js_function() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     fn make_double(
     ) -> impl for<'a> Fn(&'a Context, &[Value<'a>]) -> Result<Value<'a>, String>
     {
@@ -387,7 +394,7 @@ fn global_set_function_called_from_js_function() {
 
 #[test]
 fn global_set_primitives() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let global = ctx.global();
 
     global.set("myBool", true).unwrap();
@@ -405,7 +412,7 @@ fn global_set_primitives() {
 
 #[test]
 fn global_set_function() {
-    let (_rt, ctx) = test_ctx();
+    let ctx = test_ctx();
     let global = ctx.global();
 
     fn make_add(
@@ -486,7 +493,7 @@ mod reactor_tests {
     fn test_with_smol_reactor() {
         let reactor = Box::new(SmolReactor::new());
         let runtime = Runtime::new(reactor);
-        let ctx = runtime.new_context();
+        let ctx = Context::new(&runtime);
 
         let promise = ctx.eval_promise("Promise.resolve(42)").unwrap();
         let val = runtime.block_on(&ctx, promise.into_future()).unwrap();
@@ -497,7 +504,7 @@ mod reactor_tests {
     fn test_smol_reactor_with_async_fn() {
         let reactor = Box::new(SmolReactor::new());
         let runtime = Runtime::new(reactor);
-        let ctx = runtime.new_context();
+        let ctx = Context::new(&runtime);
 
         let promise = ctx
             .eval_promise("(async () => { return 'from smol'; })()")
@@ -510,7 +517,7 @@ mod reactor_tests {
     fn test_smol_reactor_with_chain() {
         let reactor = Box::new(SmolReactor::new());
         let runtime = Runtime::new(reactor);
-        let ctx = runtime.new_context();
+        let ctx = Context::new(&runtime);
 
         let promise =
             ctx.eval_promise("Promise.resolve(5).then(x => x * 3)").unwrap();

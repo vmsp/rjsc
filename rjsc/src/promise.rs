@@ -304,14 +304,6 @@ impl PromiseState {
         }
     }
 
-    fn wake(&self, ctx: &Context) {
-        if let Some(waker) = self.waker.borrow().as_ref() {
-            waker.wake_by_ref();
-        }
-        // Notify the reactor that a promise has settled
-        ctx.notify_reactor();
-    }
-
     fn take_result<'ctx>(
         &self,
         ctx: &'ctx Context,
@@ -347,7 +339,7 @@ fn build_handlers<'ctx>(
     state: Rc<PromiseState>,
 ) -> Result<(Object<'ctx>, Object<'ctx>), Exception> {
     let s = Rc::clone(&state);
-    let on_resolve = ctx.make_callback(move |ctx_raw, args| {
+    let on_resolve = crate::Function::raw(ctx, move |ctx_raw, args| {
         let val = if args.is_null() {
             unsafe { JSValueMakeUndefined(ctx_raw) }
         } else {
@@ -362,7 +354,7 @@ fn build_handlers<'ctx>(
     });
 
     let s = Rc::clone(&state);
-    let on_reject = ctx.make_callback(move |ctx_raw, args| {
+    let on_reject = crate::Function::raw(ctx, move |ctx_raw, args| {
         let val = if args.is_null() {
             unsafe { JSValueMakeUndefined(ctx_raw) }
         } else {
