@@ -86,9 +86,9 @@ fn expand_function(func: ItemFn) -> proc_macro2::TokenStream {
                         ctx,
                         #ident,
                     );
-                    let #ident = #ident.into_value();
+                    let #ident = #ident.into_value(ctx);
                     let #ident = #ident
-                        .to_object(ctx)
+                        .to_object()
                         .map_err(|e| e.message().to_string())?;
                     let #ident = #crate_path::JsObjectOwned::from_object(
                         ctx,
@@ -101,9 +101,9 @@ fn expand_function(func: ItemFn) -> proc_macro2::TokenStream {
                         ctx,
                         #ident,
                     );
-                    let #ident = #ident.into_value();
+                    let #ident = #ident.into_value(ctx);
                     let #ident = #ident
-                        .to_object(ctx)
+                        .to_object()
                         .map_err(|e| e.message().to_string())?;
                 }
             }
@@ -151,9 +151,9 @@ fn expand_function(func: ItemFn) -> proc_macro2::TokenStream {
         }
         if sig.asyncness.is_some() {
             if is_jsvalue(ty) {
-                call_args.push(quote!(#ident.into_value()));
+                call_args.push(quote!(#ident.into_value(ctx_ref)));
             } else if is_js_object(ty) {
-                call_args.push(quote!(#ident.into_object()));
+                call_args.push(quote!(#ident.into_object(ctx_ref)));
             } else {
                 call_args.push(quote!(#ident));
             }
@@ -447,7 +447,7 @@ fn build_return_expr(
         quote! {
             let (promise, resolver) = #crate_path::JsPromise::deferred(ctx)
                 .map_err(|e| e.message().to_string())?;
-            let resolver = resolver.to_owned(ctx);
+            let resolver = resolver.to_owned();
 
             let fut: std::pin::Pin<
                 Box<dyn std::future::Future<
@@ -467,7 +467,7 @@ fn build_return_expr(
             let task = #crate_path::Task::new(fut, resolver);
             ctx.__rjsc_enqueue_task(task);
 
-            Ok(promise.to_value(ctx))
+            Ok(promise.to_value())
         }
     } else {
         quote! {

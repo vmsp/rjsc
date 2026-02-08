@@ -54,7 +54,7 @@ impl Task {
                 Poll::Ready(())
             }
             Poll::Ready(TaskResult::Value(val)) => {
-                let value = val.into_value();
+                let value = val.into_value(ctx);
                 if let Err(err) = self.resolver.resolve(ctx, &value) {
                     self.resolver
                         .reject_str(ctx, &err.message().to_string())

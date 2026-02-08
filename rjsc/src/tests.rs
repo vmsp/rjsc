@@ -122,7 +122,7 @@ fn eval_async_non_promise() {
 fn eval_promise_returns_promise() {
     let ctx = test_ctx();
     let promise = ctx.eval_promise("Promise.resolve(7)").unwrap();
-    let val = promise.await_blocking(&ctx).unwrap();
+    let val = promise.await_blocking().unwrap();
     assert_eq!(val.to_number(), 7.0);
 }
 
@@ -130,8 +130,8 @@ fn eval_promise_returns_promise() {
 fn value_to_promise() {
     let ctx = test_ctx();
     let val = ctx.eval("Promise.resolve(9)").unwrap();
-    let promise = val.to_promise(&ctx).unwrap();
-    let val = promise.await_blocking(&ctx).unwrap();
+    let promise = val.to_promise().unwrap();
+    let val = promise.await_blocking().unwrap();
     assert_eq!(val.to_number(), 9.0);
 }
 
@@ -139,12 +139,12 @@ fn value_to_promise() {
 fn promise_deferred_resolve() {
     let ctx = test_ctx();
     let (promise, resolver) = JsPromise::deferred(&ctx).unwrap();
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
     let value = JsValue::from_str(&ctx, "done");
-    resolver.resolve(&ctx, &value).unwrap();
+    resolver.resolve(&value).unwrap();
     let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
     assert_eq!(val.to_string_lossy(), "done");
 }
@@ -153,11 +153,11 @@ fn promise_deferred_resolve() {
 fn promise_deferred_reject() {
     let ctx = test_ctx();
     let (promise, resolver) = JsPromise::deferred(&ctx).unwrap();
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
-    resolver.reject_str(&ctx, "nope").unwrap();
+    resolver.reject_str("nope").unwrap();
     let err = poll_promise_future(fut.as_mut(), &ctx).unwrap_err();
     assert_eq!(err.message(), "nope");
 }
@@ -166,7 +166,7 @@ fn promise_deferred_reject() {
 fn promise_into_future() {
     let ctx = test_ctx();
     let promise = ctx.eval_promise("Promise.resolve(123)").unwrap();
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
     assert_eq!(val.to_number(), 123.0);
 }
@@ -228,7 +228,7 @@ fn object_new_and_properties() {
     obj.set("foo", &val).unwrap();
     assert!(obj.has("foo"));
 
-    let got = obj.get("foo", &ctx).unwrap();
+    let got = obj.get("foo").unwrap();
     assert_eq!(got.to_number(), 42.0);
 
     let names = obj.property_names();
@@ -252,17 +252,17 @@ fn object_delete_property() {
 fn object_index_access() {
     let ctx = test_ctx();
     let arr = ctx.eval("[10, 20, 30]").unwrap();
-    let arr_obj = arr.to_object(&ctx).unwrap();
+    let arr_obj = arr.to_object().unwrap();
 
-    let first = arr_obj.get_index(0, &ctx).unwrap();
+    let first = arr_obj.get_index(0).unwrap();
     assert_eq!(first.to_number(), 10.0);
 
-    let third = arr_obj.get_index(2, &ctx).unwrap();
+    let third = arr_obj.get_index(2).unwrap();
     assert_eq!(third.to_number(), 30.0);
 
     let replacement = JsValue::from_f64(&ctx, 99.0);
     arr_obj.set_index(1, &replacement).unwrap();
-    let updated = arr_obj.get_index(1, &ctx).unwrap();
+    let updated = arr_obj.get_index(1).unwrap();
     assert_eq!(updated.to_number(), 99.0);
 }
 
@@ -270,12 +270,12 @@ fn object_index_access() {
 fn object_from_eval() {
     let ctx = test_ctx();
     let val = ctx.eval("({a: 1, b: 'two'})").unwrap();
-    let obj = val.to_object(&ctx).unwrap();
+    let obj = val.to_object().unwrap();
 
-    let a = obj.get("a", &ctx).unwrap();
+    let a = obj.get("a").unwrap();
     assert_eq!(a.to_number(), 1.0);
 
-    let b = obj.get("b", &ctx).unwrap();
+    let b = obj.get("b").unwrap();
     assert_eq!(b.to_string_lossy(), "two");
 }
 
@@ -283,12 +283,12 @@ fn object_from_eval() {
 fn object_call_function() {
     let ctx = test_ctx();
     let func_val = ctx.eval("(function(x) { return x * 2; })").unwrap();
-    let func = func_val.to_object(&ctx).unwrap();
+    let func = func_val.to_object().unwrap();
 
     assert!(func.is_function());
 
     let arg = JsValue::from_f64(&ctx, 21.0);
-    let result = func.call(None, &[&arg], &ctx).unwrap();
+    let result = func.call(None, &[&arg]).unwrap();
     assert_eq!(result.to_number(), 42.0);
 }
 
@@ -296,11 +296,11 @@ fn object_call_function() {
 fn object_call_method() {
     let ctx = test_ctx();
     let val = ctx
-        .eval(concat!("({value: 10, double() { return this.value * 2; }})"))
+        .eval(concat!("({value: 10, double() ", "{ return this.value * 2; }})"))
         .unwrap();
-    let obj = val.to_object(&ctx).unwrap();
+    let obj = val.to_object().unwrap();
 
-    let result = obj.call_method("double", &[], &ctx).unwrap();
+    let result = obj.call_method("double", &[]).unwrap();
     assert_eq!(result.to_number(), 20.0);
 }
 
@@ -355,10 +355,10 @@ fn register_fn_called_from_js_function() {
         Ok(JsValue::from_f64(ctx, n * 2.0))
     });
     let result = ctx.eval("[1,2,3].map(double)").unwrap();
-    let arr = result.to_object(&ctx).unwrap();
-    assert_eq!(arr.get_index(0, &ctx).unwrap().to_number(), 2.0);
-    assert_eq!(arr.get_index(1, &ctx).unwrap().to_number(), 4.0);
-    assert_eq!(arr.get_index(2, &ctx).unwrap().to_number(), 6.0);
+    let arr = result.to_object().unwrap();
+    assert_eq!(arr.get_index(0).unwrap().to_number(), 2.0);
+    assert_eq!(arr.get_index(1).unwrap().to_number(), 4.0);
+    assert_eq!(arr.get_index(2).unwrap().to_number(), 6.0);
 }
 
 #[crate::function]
@@ -381,13 +381,18 @@ async fn macro_async_jsvalue<'a>(
 }
 
 #[crate::function]
+async fn macro_async_obj_arg(_ctx: &JsContext, obj: JsObject<'_>) -> f64 {
+    obj.get("n").unwrap().to_number()
+}
+
+#[crate::function]
 async fn macro_async_jsobject<'a>(
     ctx: &'a JsContext,
 ) -> Result<JsObject<'a>, String> {
     let val = ctx
         .eval("({answer: 42, label: 'ok'})")
         .map_err(|e| e.message().to_string())?;
-    val.to_object(ctx).map_err(|e| e.message().to_string())
+    val.to_object().map_err(|e| e.message().to_string())
 }
 
 #[crate::function]
@@ -400,11 +405,6 @@ async fn macro_async_result<'a>(
     } else {
         Err("nope".into())
     }
-}
-
-#[crate::function]
-async fn macro_async_obj_arg(ctx: &JsContext, obj: JsObject<'_>) -> f64 {
-    obj.get("n", ctx).unwrap().to_number()
 }
 
 #[test]
@@ -420,9 +420,9 @@ fn macro_async_returns_promise() {
     let ctx = test_ctx();
     register_macro_async_add(&ctx);
     let val = ctx.eval("macro_async_add(5, 7)").unwrap();
-    let promise = val.to_promise(&ctx).unwrap();
+    let promise = val.to_promise().unwrap();
 
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
@@ -438,9 +438,9 @@ fn macro_async_jsvalue_roundtrip() {
     let ctx = test_ctx();
     register_macro_async_jsvalue(&ctx);
     let val = ctx.eval("macro_async_jsvalue(6)").unwrap();
-    let promise = val.to_promise(&ctx).unwrap();
+    let promise = val.to_promise().unwrap();
 
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
@@ -455,19 +455,19 @@ fn macro_async_jsobject_result() {
     let ctx = test_ctx();
     register_macro_async_jsobject(&ctx);
     let val = ctx.eval("macro_async_jsobject()").unwrap();
-    let promise = val.to_promise(&ctx).unwrap();
+    let promise = val.to_promise().unwrap();
 
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
 
     assert_eq!(ctx.poll_async(), 1);
     let val = poll_promise_future(fut.as_mut(), &ctx).unwrap();
-    let obj = val.to_object(&ctx).unwrap();
-    let answer = obj.get("answer", &ctx).unwrap();
+    let obj = val.to_object().unwrap();
+    let answer = obj.get("answer").unwrap();
     assert_eq!(answer.to_number(), 42.0);
-    let label = obj.get("label", &ctx).unwrap();
+    let label = obj.get("label").unwrap();
     assert_eq!(label.to_string_lossy(), "ok");
 }
 
@@ -476,9 +476,9 @@ fn macro_async_result_rejects() {
     let ctx = test_ctx();
     register_macro_async_result(&ctx);
     let val = ctx.eval("macro_async_result(false)").unwrap();
-    let promise = val.to_promise(&ctx).unwrap();
+    let promise = val.to_promise().unwrap();
 
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
@@ -493,9 +493,9 @@ fn macro_async_obj_arg_promise() {
     let ctx = test_ctx();
     register_macro_async_obj_arg(&ctx);
     let val = ctx.eval("macro_async_obj_arg({n: 9})").unwrap();
-    let promise = val.to_promise(&ctx).unwrap();
+    let promise = val.to_promise().unwrap();
 
-    let mut fut = Box::pin(promise.into_future(&ctx));
+    let mut fut = Box::pin(promise.into_future());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));

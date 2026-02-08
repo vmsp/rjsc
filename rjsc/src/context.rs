@@ -58,10 +58,12 @@ impl JsContext {
         Ok(unsafe { JsValue::from_raw(self, result) })
     }
 
-    /// Evaluates JavaScript code and, if it returns a promise, resolves it.
+    /// Evaluates JavaScript code and, if it returns a promise,
+    /// resolves it.
     ///
-    /// This is a blocking helper that uses the default microtask drain driver.
-    /// Use [`JsPromise::into_future`] for non-blocking integration.
+    /// This is a blocking helper that uses the default microtask
+    /// drain driver. Use [`JsPromise::into_future`] for
+    /// non-blocking integration.
     pub fn eval_async(&self, code: &str) -> Result<JsValue<'_>, JsException> {
         let value = self.eval(code)?;
         if !value.is_object() {
@@ -69,8 +71,8 @@ impl JsContext {
         }
 
         let raw = value.raw;
-        match JsPromise::from_value(self, value) {
-            Ok(promise) => promise.await_blocking(self),
+        match JsPromise::from_value(value) {
+            Ok(promise) => promise.await_blocking(),
             Err(_) => Ok(unsafe { JsValue::from_raw(self, raw) }),
         }
     }
@@ -81,7 +83,7 @@ impl JsContext {
         code: &str,
     ) -> Result<JsPromise<'_>, JsException> {
         let value = self.eval(code)?;
-        JsPromise::from_value(self, value)
+        JsPromise::from_value(value)
     }
 
     pub fn poll_async(&self) -> usize {

@@ -33,7 +33,9 @@ impl Deref for JsContextOwned {
 
 pub struct JsValueOwned {
     ctx: JSGlobalContextRef,
-    runtime: Option<Rc<crate::runtime::JsRuntimeInner>>,
+    /// Prevents the runtime `Rc` from dropping while this
+    /// value is alive.
+    _runtime: Option<Rc<crate::runtime::JsRuntimeInner>>,
     raw: JSValueRef,
 }
 
@@ -42,7 +44,7 @@ impl JsValueOwned {
         unsafe { JSValueProtect(ctx.as_ctx(), value.raw) };
         JsValueOwned {
             ctx: ctx.raw(),
-            runtime: ctx._runtime.clone(),
+            _runtime: ctx._runtime.clone(),
             raw: value.raw,
         }
     }
@@ -50,19 +52,20 @@ impl JsValueOwned {
     pub fn from_value(ctx: &JsContext, value: JsValue<'_>) -> Self {
         let raw = value.raw;
         mem::forget(value);
-        JsValueOwned { ctx: ctx.raw(), runtime: ctx._runtime.clone(), raw }
+        JsValueOwned { ctx: ctx.raw(), _runtime: ctx._runtime.clone(), raw }
     }
 
-    pub fn into_value(self) -> JsValue<'static> {
-        let ctx = mem::ManuallyDrop::new(JsContext {
-            raw: self.ctx,
-            _not_send_sync: std::marker::PhantomData,
-            _runtime: self.runtime.clone(),
-        });
-        let value = unsafe { JsValue::from_raw(&ctx, self.raw) };
+    /// Converts into a `JsValue` tied to the given context.
+    ///
+    /// # Safety
+    /// The caller must ensure `ctx` points to the same
+    /// underlying JSC context and outlives the returned
+    /// value.
+    pub fn into_value<'a>(self, ctx: &'a JsContext) -> JsValue<'a> {
+        let value = unsafe { JsValue::from_raw(ctx, self.raw) };
         unsafe { JSValueUnprotect(self.ctx, self.raw) };
         mem::forget(self);
-        unsafe { mem::transmute::<JsValue<'_>, JsValue<'static>>(value) }
+        value
     }
 }
 
@@ -85,22 +88,23 @@ impl JsObjectOwned {
         JsObjectOwned { ctx: ctx.raw(), runtime: ctx._runtime.clone(), raw }
     }
 
-    pub fn into_object(self) -> JsObject<'static> {
-        let ctx = mem::ManuallyDrop::new(JsContext {
-            raw: self.ctx,
-            _not_send_sync: std::marker::PhantomData,
-            _runtime: self.runtime.clone(),
-        });
-        let obj = unsafe { JsObject::from_raw(&ctx, self.raw) };
+    /// Converts into a `JsObject` tied to the given context.
+    ///
+    /// # Safety
+    /// The caller must ensure `ctx` points to the same
+    /// underlying JSC context and outlives the returned
+    /// object.
+    pub fn into_object<'a>(self, ctx: &'a JsContext) -> JsObject<'a> {
+        let obj = unsafe { JsObject::from_raw(ctx, self.raw) };
         unsafe { JSValueUnprotect(self.ctx, self.raw) };
         mem::forget(self);
-        unsafe { mem::transmute::<JsObject<'_>, JsObject<'static>>(obj) }
+        obj
     }
 
     pub fn into_value(self) -> JsValueOwned {
         let value = JsValueOwned {
             ctx: self.ctx,
-            runtime: self.runtime.clone(),
+            _runtime: self.runtime.clone(),
             raw: self.raw as JSValueRef,
         };
         mem::forget(self);
