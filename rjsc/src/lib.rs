@@ -8,7 +8,7 @@ mod promise;
 mod reactor;
 mod runtime;
 mod strings;
-mod task;
+pub mod task;
 mod value;
 
 #[cfg(test)]
@@ -22,6 +22,10 @@ pub use promise::{Promise, PromiseFuture, PromiseResolver};
 pub use reactor::{MicrotaskReactor, PollStatus, Reactor};
 pub use runtime::Runtime;
 pub use value::Value;
+
+// Re-export task types for the #[function] macro
+#[doc(hidden)]
+pub use task::{TaskResult, TaskValue};
 
 pub use rjsc_macros::function;
 

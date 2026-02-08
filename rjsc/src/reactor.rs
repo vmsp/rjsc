@@ -46,7 +46,8 @@ pub trait Reactor: std::any::Any {
 /// This is the simplest possible reactor and is used as the default
 /// when no external event loop integration is needed.
 pub struct MicrotaskReactor {
-    noop: rjsc_sys::JSStringRef,
+    #[doc(hidden)]
+    pub noop: rjsc_sys::JSStringRef,
 }
 
 impl MicrotaskReactor {

@@ -9,6 +9,7 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_name = &input_fn.sig.ident;
     let fn_vis = &input_fn.vis;
     let fn_block = &input_fn.block;
+    let is_async = input_fn.sig.asyncness.is_some();
 
     // Create internal name for the actual function
     let internal_name = format_ident!("__rjsc_{}", fn_name);
@@ -17,9 +18,12 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Build the original function signature for the internal implementation
     let fn_sig = &input_fn.sig;
-    let fn_generics = &fn_sig.generics;
     let fn_inputs = &fn_sig.inputs;
     let fn_output = &fn_sig.output;
+
+    // Modify the signature to use internal name
+    let mut internal_sig = fn_sig.clone();
+    internal_sig.ident = internal_name.clone();
 
     // Extract argument analysis
     let mut arg_converters = Vec::new();
@@ -59,12 +63,6 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Determine return type handling
-    let return_handling = match fn_output {
-        ReturnType::Default => ReturnHandling::Unit,
-        ReturnType::Type(_, ty) => analyze_return_type(ty),
-    };
-
     // Generate argument extraction code
     let arg_extraction: Vec<_> = arg_converters
         .iter()
@@ -86,46 +84,38 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate return conversion
-    let return_conv = match &return_handling {
-        ReturnHandling::Unit => quote! {
-            #internal_name(#(#call_args),*);
-            ::std::result::Result::Ok(::rjsc::Value::undefined(ctx))
-        },
-        ReturnHandling::Direct(ty) => {
-            let conv = generate_return_converter(ty);
-            quote! {
-                let result = #internal_name(#(#call_args),*);
-                ::std::result::Result::Ok(#conv)
-            }
-        }
-        ReturnHandling::Result(ok_ty) => {
-            let conv = generate_return_converter(ok_ty);
-            quote! {
-                match #internal_name(#(#call_args),*) {
-                    ::std::result::Result::Ok(result) => ::std::result::Result::Ok(#conv),
-                    ::std::result::Result::Err(e) => ::std::result::Result::Err(e.to_string()),
-                }
-            }
-        }
+    // Generate the wrapper body based on sync vs async
+    let wrapper_body = if is_async {
+        generate_async_wrapper_body(
+            &internal_name,
+            &call_args,
+            fn_output,
+            &arg_extraction,
+        )
+    } else {
+        generate_sync_wrapper_body(
+            &internal_name,
+            &call_args,
+            fn_output,
+            &arg_extraction,
+        )
     };
 
     // Generate the output
     let output = quote! {
-        // The original function, renamed
+        // The internal function with the actual implementation
         #[doc(hidden)]
-        #fn_vis fn #internal_name #fn_generics (#fn_inputs) #fn_output {
+        #fn_vis #internal_sig {
             #fn_block
         }
 
-        // Wrapper function
+        // Wrapper function that bridges JS -> Rust
         #[doc(hidden)]
         #fn_vis fn #wrapper_name<'ctx>(
             ctx: &'ctx ::rjsc::Context,
             args: &[::rjsc::Value<'ctx>],
         ) -> ::std::result::Result<::rjsc::Value<'ctx>, String> {
-            #(#arg_extraction)*
-            #return_conv
+            #wrapper_body
         }
 
         // Marker struct for IntoJs implementation
@@ -144,6 +134,105 @@ pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     output.into()
+}
+
+fn generate_sync_wrapper_body(
+    internal_name: &syn::Ident,
+    call_args: &[proc_macro2::TokenStream],
+    fn_output: &ReturnType,
+    arg_extraction: &[&proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    // Determine return type handling
+    let return_handling = match fn_output {
+        ReturnType::Default => ReturnHandling::Unit,
+        ReturnType::Type(_, ty) => analyze_return_type(ty),
+    };
+
+    // Generate return conversion
+    match &return_handling {
+        ReturnHandling::Unit => quote! {
+            #(#arg_extraction)*
+            #internal_name(#(#call_args),*);
+            ::std::result::Result::Ok(::rjsc::Value::undefined(ctx))
+        },
+        ReturnHandling::Direct(ty) => {
+            let conv = generate_return_converter(ty);
+            quote! {
+                #(#arg_extraction)*
+                let result = #internal_name(#(#call_args),*);
+                ::std::result::Result::Ok(#conv)
+            }
+        }
+        ReturnHandling::Result(ok_ty) => {
+            let conv = generate_return_converter(ok_ty);
+            quote! {
+                #(#arg_extraction)*
+                match #internal_name(#(#call_args),*) {
+                    ::std::result::Result::Ok(result) => ::std::result::Result::Ok(#conv),
+                    ::std::result::Result::Err(e) => ::std::result::Result::Err(e.to_string()),
+                }
+            }
+        }
+    }
+}
+
+fn generate_async_wrapper_body(
+    internal_name: &syn::Ident,
+    call_args: &[proc_macro2::TokenStream],
+    fn_output: &ReturnType,
+    arg_extraction: &[&proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    // Determine the output type of the async function
+    let return_handling = match fn_output {
+        ReturnType::Default => ReturnHandling::Unit,
+        ReturnType::Type(_, ty) => {
+            // For async functions, the return type is wrapped in impl Future<Output = ...>
+            // but we see the inner type here
+            analyze_return_type(ty)
+        }
+    };
+
+    // Generate the code that converts the async result to TaskResult
+    let result_conv = match &return_handling {
+        ReturnHandling::Unit => quote! {
+            fut.await;
+            ::rjsc::task::TaskResult::Ok(::rjsc::task::TaskValue::Undefined)
+        },
+        ReturnHandling::Direct(ty) => {
+            let conv = generate_task_result_converter(ty);
+            quote! {
+                let result = fut.await;
+                #conv
+            }
+        }
+        ReturnHandling::Result(ok_ty) => {
+            let conv = generate_task_result_converter(ok_ty);
+            quote! {
+                match fut.await {
+                    ::std::result::Result::Ok(result) => #conv,
+                    ::std::result::Result::Err(e) => ::rjsc::task::TaskResult::Err(e.to_string()),
+                }
+            }
+        }
+    };
+
+    quote! {
+        #(#arg_extraction)*
+
+        // Get the runtime from context
+        let runtime = ctx.runtime()
+            .ok_or_else(|| "Context has no runtime".to_string())?;
+
+        // Call the async function to get the future
+        let fut = #internal_name(#(#call_args),*);
+
+        // Spawn the async work and return the promise
+        let promise_val = runtime.spawn_async(ctx, async move {
+            #result_conv
+        }).map_err(|e| e.to_string())?;
+
+        ::std::result::Result::Ok(promise_val)
+    }
 }
 
 struct ArgConverter {
@@ -263,4 +352,26 @@ fn generate_return_converter(ty: &Type) -> proc_macro2::TokenStream {
         }
     }
     panic!("Unsupported return type")
+}
+
+fn generate_task_result_converter(ty: &Type) -> proc_macro2::TokenStream {
+    if let Type::Path(type_path) = ty {
+        if let Some(seg) = type_path.path.segments.last() {
+            let type_name = seg.ident.to_string();
+            return match type_name.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16"
+                | "u32" | "u64" | "usize" | "f32" | "f64" => {
+                    quote! { ::rjsc::task::TaskResult::Ok(::rjsc::task::TaskValue::F64(result as f64)) }
+                }
+                "bool" => {
+                    quote! { ::rjsc::task::TaskResult::Ok(::rjsc::task::TaskValue::Bool(result)) }
+                }
+                "String" => {
+                    quote! { ::rjsc::task::TaskResult::Ok(::rjsc::task::TaskValue::String(result)) }
+                }
+                _ => panic!("Unsupported async return type: {}", type_name),
+            };
+        }
+    }
+    panic!("Unsupported async return type")
 }

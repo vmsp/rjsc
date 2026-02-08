@@ -20,6 +20,12 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Creates a Runtime from an existing RuntimeInner.
+    #[doc(hidden)]
+    pub fn from_inner(inner: Rc<RuntimeInner>) -> Self {
+        Self { inner }
+    }
+
     /// Creates a new JavaScript runtime with the given reactor.
     ///
     /// The reactor is responsible for driving the event loop,
@@ -78,31 +84,47 @@ impl Runtime {
     /// Block on a future until it completes.
     ///
     /// This integrates with the reactor's event loop to drive
-    /// the future to completion.
+    /// the future to completion. Also polls any pending tasks
+    /// from spawned async functions.
     pub fn block_on<F: Future + Unpin>(
         &self,
         ctx: &crate::Context,
-        fut: F,
+        mut fut: F,
     ) -> F::Output {
-        // Try to downcast to MicrotaskReactor for its efficient block_on
-        // Otherwise fall back to generic polling
         self.with_reactor(|r| {
-            // Safe because we're just checking the type
-            if let Some(mt) = r.as_any().downcast_ref::<MicrotaskReactor>() {
-                mt.block_on(ctx, fut)
-            } else {
-                // Generic implementation that polls the reactor
-                let waker = noop_waker();
-                let mut cx = TaskContext::from_waker(&waker);
-                let mut fut = std::pin::pin!(fut);
+            // Check if this is a microtask reactor for optimized path
+            let is_microtask =
+                r.as_any().downcast_ref::<MicrotaskReactor>().is_some();
 
-                loop {
-                    match fut.as_mut().poll(&mut cx) {
-                        Poll::Ready(val) => return val,
-                        Poll::Pending => {
-                            if let Err(e) = r.poll(ctx) {
-                                panic!("Reactor poll failed: {:?}", e);
+            let waker = noop_waker();
+            let mut cx = TaskContext::from_waker(&waker);
+
+            loop {
+                // Poll tasks first to make progress on spawned async work
+                self.inner.poll_tasks(ctx);
+
+                // Poll the future
+                match std::pin::Pin::new(&mut fut).poll(&mut cx) {
+                    Poll::Ready(val) => return val,
+                    Poll::Pending => {
+                        // Poll the reactor for microtasks
+                        if is_microtask {
+                            // For microtask reactor, just drain microtasks
+                            unsafe {
+                                rjsc_sys::JSEvaluateScript(
+                                    ctx.as_ctx(),
+                                    r.as_any()
+                                        .downcast_ref::<MicrotaskReactor>()
+                                        .unwrap()
+                                        .noop,
+                                    std::ptr::null_mut(),
+                                    std::ptr::null_mut(),
+                                    0,
+                                    std::ptr::null_mut(),
+                                );
                             }
+                        } else if let Err(e) = r.poll(ctx) {
+                            panic!("Reactor poll failed: {:?}", e);
                         }
                     }
                 }
@@ -113,6 +135,31 @@ impl Runtime {
     /// Returns true if the runtime has any pending tasks.
     pub fn has_pending_tasks(&self) -> bool {
         !self.inner.tasks.borrow().is_empty()
+    }
+
+    /// Spawn a future and return a Promise.
+    ///
+    /// This is used by the #[function] macro for async functions.
+    /// Creates a deferred promise, spawns the future as a task,
+    /// and returns the promise value immediately.
+    #[doc(hidden)]
+    pub fn spawn_async<'a, F>(
+        &self,
+        ctx: &'a crate::Context,
+        future: F,
+    ) -> Result<crate::Value<'a>, crate::Exception>
+    where
+        F: std::future::Future<Output = crate::task::TaskResult> + 'static,
+    {
+        // Create a deferred promise
+        let (promise, resolver) = crate::Promise::deferred(ctx)?;
+        let resolver_owned = resolver.to_owned();
+
+        // Create and push the task
+        let task = crate::task::Task::new(Box::pin(future), resolver_owned);
+        self.inner.push_task(task);
+
+        Ok(promise.to_value())
     }
 }
 

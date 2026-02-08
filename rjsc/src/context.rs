@@ -137,6 +137,16 @@ impl Context {
         self.with_reactor(|r| r.notify());
     }
 
+    /// Get a reference to the runtime for this context.
+    ///
+    /// This is used by the #[function] macro for async functions.
+    #[doc(hidden)]
+    pub fn runtime(&self) -> Option<crate::Runtime> {
+        self._runtime
+            .as_ref()
+            .map(|inner| crate::Runtime::from_inner(std::rc::Rc::clone(inner)))
+    }
+
     /// Returns the raw `JSGlobalContextRef`.
     pub fn raw(&self) -> JSGlobalContextRef {
         self.raw
